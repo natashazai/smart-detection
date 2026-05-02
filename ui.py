@@ -37,7 +37,7 @@ SCENARIOS = [
 
 
 def main() -> None:
-    st.set_page_config(page_title="SENTINEL — Tremor Monitor", layout="wide")
+    st.set_page_config(page_title="Tremor Monitor", layout="wide")
 
     st.markdown("""
     <style>
@@ -48,8 +48,8 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("🧠 SENTINEL — Tremor Monitor")
-    st.caption("Nemotron 120B severity classification · Not a medical diagnostic device")
+    st.title("Tremor Monitor")
+    st.caption("Nemotron 120B severity classification | Not a medical diagnostic device")
     st.divider()
 
     # sidebar — pick scenario
@@ -66,7 +66,7 @@ def main() -> None:
         st.caption(f"Amplitude : {scenario['amplitude']} mm")
         st.caption(f"Noise     : {scenario['noise']}")
 
-        run = st.button("▶ Run Analysis", type="primary", use_container_width=True)
+        run = st.button("Run Analysis", type="primary", use_container_width=True)
 
     if run:
         with st.spinner("Generating mock data and calling Nemotron 120B..."):
