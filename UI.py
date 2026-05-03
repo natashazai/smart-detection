@@ -1,4 +1,4 @@
-"""Streamlit dashboard for SENTINEL tremor analysis.
+"""Streamlit dashboard for Early Parkinson's Screening tremor analysis.
 
 Run with:
     streamlit run UI.py
@@ -275,7 +275,7 @@ def render_report_loading(slot) -> None:
             '<div class="report-status-spinner"></div>'
             "<div>"
             '<p class="report-status-title">Preparing PDF report</p>'
-            '<p class="report-status-detail">Nemotron is writing the clinical report and SENTINEL is formatting the PDF.</p>'
+            '<p class="report-status-detail">Nemotron is writing the clinical report and Early Parkinson\'s Screening is formatting the PDF.</p>'
             "</div>"
             "</div>"
         ),
@@ -285,7 +285,7 @@ def render_report_loading(slot) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="SENTINEL -- Tremor Screening",
+        page_title="Early Parkinson's Screening -- Tremor Screening",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -389,7 +389,7 @@ def main() -> None:
         border-radius: 50%;
         border: 3px solid #dbeafe;
         border-top-color: #2563eb;
-        animation: sentinel-spin 0.85s linear infinite;
+        animation: Early Parkinson's Screening-spin 0.85s linear infinite;
     }
     .report-status-title {
         color: #1e3a5f;
@@ -457,7 +457,7 @@ def main() -> None:
         border-radius: 50%;
         border: 6px solid #dbeafe;
         border-top-color: #2563eb;
-        animation: sentinel-spin 0.85s linear infinite;
+        animation: Early Parkinson's Screening-spin 0.85s linear infinite;
         margin-bottom: 24px;
     }
     .processing-kicker {
@@ -493,14 +493,14 @@ def main() -> None:
         border-radius: 50%;
         background: #2563eb;
         opacity: 0.35;
-        animation: sentinel-pulse 1.2s ease-in-out infinite;
+        animation: Early Parkinson's Screening-pulse 1.2s ease-in-out infinite;
     }
     .processing-steps span:nth-child(2) { animation-delay: 0.16s; }
     .processing-steps span:nth-child(3) { animation-delay: 0.32s; }
-    @keyframes sentinel-spin {
+    @keyframes Early Parkinson's Screening-spin {
         to { transform: rotate(360deg); }
     }
-    @keyframes sentinel-pulse {
+    @keyframes Early Parkinson's Screening-pulse {
         0%, 100% { opacity: 0.25; transform: scale(0.85); }
         50% { opacity: 1; transform: scale(1); }
     }
@@ -526,7 +526,7 @@ def main() -> None:
     <div style='background:#1a3a5c;padding:16px 32px;margin:0 0 32px 0;border-radius:8px;
                 display:flex;align-items:center;justify-content:space-between;'>
         <div style='display:flex;align-items:center;gap:12px;'>
-            <span style='font-size:22px;font-weight:700;color:white;letter-spacing:0.05em;'>SENTINEL</span>
+            <span style='font-size:22px;font-weight:700;color:white;letter-spacing:0.05em;'>Early Parkinson's Screening</span>
             <span style='background:#2563eb;color:white;font-size:10px;font-weight:600;
                          padding:3px 8px;border-radius:4px;letter-spacing:0.08em;'>BETA</span>
         </div>
@@ -540,7 +540,7 @@ def main() -> None:
         <div style='background:#1a3a5c;padding:20px 16px 16px 16px;
                     margin:-60px -16px 20px -16px;border-bottom:1px solid #2d5a8e;'>
             <p style='color:#93c5fd;font-size:13px;letter-spacing:0.1em;
-                      text-transform:uppercase;margin:0 0 4px 0;font-weight:700;'>SENTINEL</p>
+                      text-transform:uppercase;margin:0 0 4px 0;font-weight:700;'>Early Parkinson's Screening</p>
             <p style='color:#4a7aaa;font-size:14px;margin:0;'>Patient Assessment Panel</p>
         </div>
         """, unsafe_allow_html=True)
@@ -633,7 +633,7 @@ def main() -> None:
         render_processing_screen(
             processing_slot,
             "Analyzing movement signal",
-            "SENTINEL is extracting tremor amplitude, frequency, symmetry, and signal quality from the captured video.",
+            "Early Parkinson's Screening is extracting tremor amplitude, frequency, symmetry, and signal quality from the captured video.",
         )
         features = analyze_tremor(hand_data)
 
