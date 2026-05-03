@@ -55,7 +55,6 @@ HAND_CONNECTIONS = (
 DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES = (
     Path("hand_landmarker.task"),
     Path("models/hand_landmarker.task"),
-    Path.home() / "Dev/HackathonParkinsonsDetection/models/hand_landmarker.task",
 )
 
 
@@ -392,7 +391,7 @@ class SolutionsHandsDetector:
         self._hands = mp.solutions.hands.Hands(
             static_image_mode=False,
             max_num_hands=self.max_num_hands,
-            model_complexity=1,
+            model_complexity=0,
             min_detection_confidence=self.min_detection_confidence,
             min_tracking_confidence=self.min_tracking_confidence,
         )
