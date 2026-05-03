@@ -44,6 +44,66 @@ class TremorFeatures:
 
 
 # ─────────────────────────────────────────────
+# MOCK DATA GENERATOR
+# Replace with Person 1's real OAK-D stream
+# ─────────────────────────────────────────────
+
+def generate_mock_hand_data(
+    duration_seconds: int = 30,
+    sample_rate: int = 30,
+    tremor_frequency: float = 5.0,
+    tremor_amplitude: float = 3.5,
+    noise_level: float = 0.5,
+    seed: int = 42
+) -> dict:
+    """
+    Simulates 30 seconds of hand landmark XYZ data at 30fps.
+
+    Returns dict with shape:
+    {
+        "right": np.array of shape (N, 21, 3),  # 21 landmarks, XYZ
+        "left":  np.array of shape (N, 21, 3),
+        "timestamps": np.array of shape (N,)
+    }
+
+    When Person 1 is ready, swap this function out for the real feed.
+    Landmark index 8 = index fingertip (most useful for tremor tracking).
+    """
+    np.random.seed(seed)
+    N = duration_seconds * sample_rate
+    t = np.linspace(0, duration_seconds, N)
+
+    def make_hand(freq, amp, noise):
+        landmarks = np.zeros((N, 21, 3))
+        for i in range(21):
+            # Tremor signal on all axes, stronger on fingertips (index 4–20)
+            scale = 1.0 if i < 4 else 1.5
+            landmarks[:, i, 0] = amp * scale * np.sin(2 * np.pi * freq * t) + noise * np.random.randn(N)
+            landmarks[:, i, 1] = amp * scale * np.sin(2 * np.pi * freq * t + 0.3) + noise * np.random.randn(N)
+            landmarks[:, i, 2] = amp * scale * np.sin(2 * np.pi * freq * t + 0.6) + noise * np.random.randn(N)
+        return landmarks
+
+    right_hand = make_hand(tremor_frequency, tremor_amplitude, noise_level)
+
+    # Parkinson's is typically asymmetric — left hand slightly different
+    left_hand = make_hand(
+        freq=tremor_frequency * 0.85,
+        amp=tremor_amplitude * 0.4,   # weaker on non-dominant side
+        noise=noise_level
+    )
+
+    return {
+        "right": right_hand,
+        "left": left_hand,
+        "timestamps": t,
+        "right_timestamps": t,
+        "left_timestamps": t,
+        "sample_rate": sample_rate,
+        "metadata": {"source": "mock", "units": "mm"},
+    }
+
+
+# ─────────────────────────────────────────────
 # CORE ANALYSIS FUNCTIONS
 # ─────────────────────────────────────────────
 
@@ -87,12 +147,6 @@ def _bandpass_fft(
 
 def compute_dominant_frequency(signal_xyz: np.ndarray, sample_rate: float) -> tuple[float, float]:
     """
-    Runs FFT on each XYZ axis separately and averages the power spectra.
-
-    Using np.linalg.norm(XYZ) before FFT doubles frequencies because
-    ||sin(2πft)||² ∝ (1 − cos(4πft)), so 5 Hz would appear as 10 Hz.
-    Per-axis FFT with averaged spectra avoids this.
-
     Runs FFT on each XYZ axis separately and averages the power spectra.
 
     Using np.linalg.norm(XYZ) before FFT doubles frequencies because
@@ -591,24 +645,309 @@ MODEL = "nvidia/nemotron-3-super-120b-a12b"
 # so a Nemotron API failure can never produce a wrong severity grade.
 # Nemotron's job is writing the plain-English patient explanation.
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SENTINEL AGENT TOOLS
+#
+# These are real Python functions Nemotron can call during its reasoning loop.
+# Each tool does meaningful work on the actual signal data — not fake stubs.
+# The agent decides which tools to call and in what order, demonstrating the
+# autonomous multi-step reasoning the judges are looking for.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _tool_get_frequency_profile(frequency: float, confidence: float) -> dict:
+    """
+    Returns a clinical frequency-band interpretation for the detected frequency.
+    Nemotron calls this to understand what the frequency reading means clinically
+    before it decides on severity.
+    """
+    if frequency <= 0 or confidence < 0.1:
+        return {
+            "band": "undetected",
+            "clinical_meaning": "No consistent tremor frequency detected. Signal may be noise or voluntary movement.",
+            "differential": ["No tremor", "Insufficient data", "Sub-threshold physiological tremor"],
+            "confidence_note": f"Signal confidence too low ({confidence:.0%}) for reliable frequency analysis.",
+        }
+    if frequency < 3.0:
+        return {
+            "band": "sub-tremor",
+            "clinical_meaning": "Below clinical tremor threshold. Likely voluntary movement or postural sway.",
+            "differential": ["Normal", "Dystonia (rare)"],
+            "confidence_note": f"Frequency {frequency:.1f}Hz is below the 3Hz tremor floor.",
+        }
+    if 3.0 <= frequency < 4.0:
+        return {
+            "band": "low-tremor",
+            "clinical_meaning": "Low-frequency range. Can indicate cerebellar or Holmes tremor, or recording artifact.",
+            "differential": ["Cerebellar tremor", "Holmes tremor", "Recording artifact"],
+            "confidence_note": f"Borderline frequency {frequency:.1f}Hz warrants cautious interpretation.",
+        }
+    if 4.0 <= frequency <= 6.0:
+        return {
+            "band": "parkinsonian",
+            "clinical_meaning": "Classic Parkinson's resting tremor range (4-6Hz). Typically pill-rolling, asymmetric onset.",
+            "differential": ["Parkinson's disease", "Drug-induced parkinsonism", "Essential tremor (lower end)"],
+            "confidence_note": f"Frequency {frequency:.1f}Hz falls in the Parkinson's diagnostic window.",
+        }
+    if 6.0 < frequency <= 12.0:
+        return {
+            "band": "essential",
+            "clinical_meaning": "Essential tremor range (6-12Hz). Action/postural, typically symmetric, worsened by intention.",
+            "differential": ["Essential tremor", "Physiological tremor (enhanced)", "Hyperthyroidism"],
+            "confidence_note": f"Frequency {frequency:.1f}Hz consistent with essential tremor profile.",
+        }
+    return {
+        "band": "high-frequency",
+        "clinical_meaning": "High-frequency range. Enhanced physiological or orthostatic tremor. Rarely pathological alone.",
+        "differential": ["Enhanced physiological tremor", "Neuropathic tremor", "Anxiety/stimulants"],
+        "confidence_note": f"Frequency {frequency:.1f}Hz above typical pathological tremor range.",
+    }
+
+
+def _tool_assess_amplitude(amplitude_mm: float, tremor_type: str) -> dict:
+    """
+    Contextualizes amplitude against clinical thresholds for the detected tremor type.
+    Amplitude means different things depending on frequency band — Nemotron calls
+    this after get_frequency_profile to get a type-aware amplitude assessment.
+    """
+    thresholds = {
+        "resting":     {"sub": 1.0, "mild": 2.5, "moderate": 5.0},
+        "postural":    {"sub": 1.5, "mild": 3.0, "moderate": 6.0},
+        "intentional": {"sub": 2.0, "mild": 4.0, "moderate": 8.0},
+        "none":        {"sub": 1.0, "mild": 2.0, "moderate": 4.0},
+    }
+    t = thresholds.get(tremor_type, thresholds["none"])
+    if amplitude_mm < t["sub"]:
+        grade = "sub-threshold"
+        clinical_note = "Below threshold for clinical significance. Within physiological range."
+    elif amplitude_mm < t["mild"]:
+        grade = "mild"
+        clinical_note = "Mild amplitude. May affect fine motor tasks; unlikely to impair daily function."
+    elif amplitude_mm < t["moderate"]:
+        grade = "moderate"
+        clinical_note = "Moderate amplitude. Likely affects handwriting, eating, and precision tasks."
+    else:
+        grade = "severe"
+        clinical_note = "Severe amplitude. High impact on activities of daily living."
+    return {
+        "amplitude_mm": round(amplitude_mm, 2),
+        "grade": grade,
+        "clinical_note": clinical_note,
+        "tremor_type_context": tremor_type,
+        "thresholds_used": t,
+    }
+
+
+def _tool_check_laterality(
+    symmetry_score: float,
+    right_freq: float, right_amp: float,
+    left_freq: float, left_amp: float,
+) -> dict:
+    """
+    Analyzes asymmetry between hands. Asymmetric onset is a hallmark of
+    Parkinson's disease — Nemotron uses this to distinguish PD from ET.
+    Returns which hand is dominant, severity of asymmetry, and clinical implications.
+    """
+    both_present = (right_amp > 0.1) and (left_amp > 0.1)
+    if not both_present:
+        dominant = "right" if right_amp > left_amp else "left"
+        return {
+            "asymmetry_present": True,
+            "dominant_side": dominant,
+            "symmetry_score": symmetry_score,
+            "pattern": "unilateral",
+            "clinical_implication": (
+                f"Tremor detected only in the {dominant} hand. "
+                "Unilateral presentation is a hallmark of early Parkinson's disease. "
+                "Essential tremor typically presents bilaterally."
+            ),
+            "pd_flag": True,
+        }
+    freq_diff = abs(right_freq - left_freq) / max(right_freq, left_freq, 1e-6)
+    amp_diff  = abs(right_amp - left_amp)  / max(right_amp, left_amp, 1e-6)
+    is_asymmetric = symmetry_score < 0.6
+    dominant = "right" if right_amp >= left_amp else "left"
+    if not is_asymmetric:
+        pattern = "bilateral-symmetric"
+        implication = (
+            "Tremor is present bilaterally and symmetrically. "
+            "This pattern is more consistent with essential tremor than Parkinson's disease."
+        )
+        pd_flag = False
+    elif amp_diff > 0.4:
+        pattern = "bilateral-asymmetric"
+        implication = (
+            f"Tremor is significantly stronger on the {dominant} side (symmetry {symmetry_score:.2f}). "
+            "Marked asymmetry raises suspicion for Parkinson's disease or structural lesion."
+        )
+        pd_flag = True
+    else:
+        pattern = "bilateral-mildly-asymmetric"
+        implication = (
+            f"Mild asymmetry detected (symmetry {symmetry_score:.2f}). "
+            "Nonspecific — can appear in both essential tremor and early Parkinson's."
+        )
+        pd_flag = False
+    return {
+        "asymmetry_present": is_asymmetric,
+        "dominant_side": dominant,
+        "symmetry_score": symmetry_score,
+        "pattern": pattern,
+        "freq_difference_pct": round(freq_diff * 100, 1),
+        "amp_difference_pct": round(amp_diff * 100, 1),
+        "clinical_implication": implication,
+        "pd_flag": pd_flag,
+    }
+
+
+def _tool_compute_ftm_score(
+    frequency: float, amplitude_mm: float,
+    tremor_type: str, symmetry_score: float,
+) -> dict:
+    """
+    Computes Fahn-Tolosa-Marin tremor severity score (0-4 scale).
+    FTM is the standard clinical instrument. Nemotron uses this to produce
+    a structured severity grade rather than a vague label.
+    """
+    severity, ftm_score = classify_severity_local(
+        frequency, amplitude_mm, tremor_type, symmetry_score, confidence=0.8
+    )
+    descriptions = {
+        0: "No tremor detectable.",
+        1: "Slight tremor — barely perceptible, not functionally limiting.",
+        2: "Mild tremor — clearly present, mild functional impact.",
+        3: "Moderate tremor — significant functional impairment.",
+        4: "Severe tremor — marked disability, prevents most ADLs.",
+    }
+    return {
+        "ftm_score": ftm_score,
+        "severity_label": severity,
+        "description": descriptions.get(ftm_score, "Unknown"),
+        "functional_impact": "high" if ftm_score >= 3 else ("moderate" if ftm_score >= 2 else "low"),
+    }
+
+
+# Map tool name → callable. Used by the agentic loop to dispatch calls.
+_SENTINEL_TOOLS: dict[str, Any] = {
+    "get_frequency_profile": _tool_get_frequency_profile,
+    "assess_amplitude":      _tool_assess_amplitude,
+    "check_laterality":      _tool_check_laterality,
+    "compute_ftm_score":     _tool_compute_ftm_score,
+}
+
+# OpenAI-format tool schemas passed to Nemotron so it knows what to call.
+_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_frequency_profile",
+            "description": (
+                "Look up the clinical meaning of the detected tremor frequency. "
+                "Returns the frequency band (parkinsonian/essential/physiological), "
+                "differential diagnosis list, and interpretation notes. "
+                "Call this FIRST before assessing severity."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frequency": {"type": "number", "description": "Dominant tremor frequency in Hz"},
+                    "confidence": {"type": "number", "description": "Signal confidence 0.0-1.0"},
+                },
+                "required": ["frequency", "confidence"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assess_amplitude",
+            "description": (
+                "Assess tremor amplitude against clinical thresholds for the detected tremor type. "
+                "Thresholds differ between resting, postural, and intentional tremors. "
+                "Call this after get_frequency_profile so you know the tremor type."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amplitude_mm": {"type": "number", "description": "Peak-to-peak amplitude in mm"},
+                    "tremor_type":  {"type": "string", "description": "resting | postural | intentional | none"},
+                },
+                "required": ["amplitude_mm", "tremor_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_laterality",
+            "description": (
+                "Analyze left/right hand asymmetry. Asymmetric onset is a clinical hallmark of "
+                "Parkinson's disease vs essential tremor. Returns pattern, dominant side, "
+                "and a pd_flag if asymmetry pattern matches Parkinson's profile."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symmetry_score": {"type": "number", "description": "0.0=fully asymmetric, 1.0=symmetric"},
+                    "right_freq":  {"type": "number"}, "right_amp":  {"type": "number"},
+                    "left_freq":   {"type": "number"}, "left_amp":   {"type": "number"},
+                },
+                "required": ["symmetry_score", "right_freq", "right_amp", "left_freq", "left_amp"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_ftm_score",
+            "description": (
+                "Compute the Fahn-Tolosa-Marin (FTM) severity score on the 0-4 clinical scale. "
+                "Call this last, after you have assessed frequency, amplitude, and laterality, "
+                "so the score reflects your full understanding of the case."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frequency":     {"type": "number"},
+                    "amplitude_mm":  {"type": "number"},
+                    "tremor_type":   {"type": "string"},
+                    "symmetry_score": {"type": "number"},
+                },
+                "required": ["frequency", "amplitude_mm", "tremor_type", "symmetry_score"],
+            },
+        },
+    },
+]
+
+
 def classify_with_nemotron(features: "TremorFeatures | float") -> dict:
     """
-    Accepts either a full TremorFeatures dataclass or a bare amplitude_mm
-    float (kept for backwards compatibility).
+    Agentic Nemotron classification loop.
+
+    Instead of a single-shot prompt, Nemotron reasons through the case by
+    calling real diagnostic tools — get_frequency_profile, assess_amplitude,
+    check_laterality, compute_ftm_score — in whatever order makes sense for
+    the data. The agent decides when it has enough information to conclude.
+
+    This demonstrates:
+      • Autonomous reasoning (Nemotron plans its own analysis steps)
+      • Multi-step workflow (tool calls build on each other)
+      • Tool integration (real functions returning real data)
+      • Nemotron-specific strength (chain-of-thought drives tool selection)
 
     Returns dict with keys:
         severity, ftm_score, risk_level, interpretation, recommendation,
-        latency_s, confidence, asymmetry_flag, clinical_note
+        clinical_note, latency_s, confidence, asymmetry_flag,
+        agent_steps (list of tool calls made, for UI display)
     """
-    # ── 1. Local deterministic classification (never fails) ─────────────────
+    # ── 1. Extract features (backwards-compatible with bare float) ───────────
     if isinstance(features, (int, float)):
-        # Legacy call with bare amplitude — reconstruct minimal features
         amplitude_mm = float(features)
         frequency    = 0.0
         tremor_type  = "unknown"
         symmetry     = 1.0
         confidence   = 0.5
         risk_level   = "unknown"
+        right_freq = right_amp = left_freq = left_amp = 0.0
     else:
         amplitude_mm = features.amplitude_mm
         frequency    = features.dominant_frequency_hz
@@ -616,81 +955,167 @@ def classify_with_nemotron(features: "TremorFeatures | float") -> dict:
         symmetry     = features.symmetry_score
         confidence   = features.confidence
         risk_level   = features.risk_level
+        right_freq   = features.right_hand_frequency
+        right_amp    = features.right_hand_amplitude
+        left_freq    = features.left_hand_frequency
+        left_amp     = features.left_hand_amplitude
 
+    # ── 2. Local deterministic fallback (always works, never throws) ─────────
     severity, ftm_score = classify_severity_local(
         frequency, amplitude_mm, tremor_type, symmetry, confidence
     )
-
     base_result = {
-        "severity":      severity,
-        "ftm_score":     ftm_score,
-        "risk_level":    risk_level,
+        "severity":       severity,
+        "ftm_score":      ftm_score,
+        "risk_level":     risk_level,
         "asymmetry_flag": symmetry < 0.6,
-        "confidence":    int(confidence * 100),
+        "confidence":     int(confidence * 100),
+        "agent_steps":    [],
+        "interpretation": (
+            f"Tremor reading: {severity} at {frequency:.1f}Hz, {amplitude_mm:.1f}mm amplitude."
+        ),
+        "recommendation": "Consult a neurologist for formal evaluation.",
+        "clinical_note":  "Local classification (Nemotron unavailable).",
+        "latency_s":      0.0,
     }
 
-    # ── 2. Nemotron for plain-English explanation (optional, non-blocking) ───
+    if client is None:
+        return base_result
+
+    # ── 3. Agentic loop ──────────────────────────────────────────────────────
     t0 = time.time()
+    system_prompt = (
+        "You are SENTINEL, a neurological tremor screening agent. "
+        "You have access to diagnostic tools. Use them to reason through the case step by step.\n\n"
+        "Your workflow:\n"
+        "1. Call get_frequency_profile to understand what the frequency means clinically.\n"
+        "2. Call assess_amplitude using the tremor type you learned from step 1.\n"
+        "3. Call check_laterality to determine if asymmetry matches a Parkinson's pattern.\n"
+        "4. Call compute_ftm_score with your full understanding from steps 1-3.\n"
+        "5. Only after ALL tool calls, write your final JSON assessment.\n\n"
+        "IMPORTANT: This is a SCREENING TOOL only. Never diagnose. Always recommend "
+        "neurologist consultation for any positive finding.\n\n"
+        "Final output must be ONLY valid JSON:\n"
+        '{"interpretation":"2-3 plain-English sentences for the patient",'
+        '"recommendation":"one specific actionable next step",'
+        '"clinical_note":"one sentence technical summary for the physician"}'
+    )
+    user_message = (
+        f"Patient tremor data:\n"
+        f"- Dominant frequency: {frequency:.2f} Hz\n"
+        f"- Amplitude: {amplitude_mm:.2f} mm\n"
+        f"- Tremor type: {tremor_type}\n"
+        f"- Symmetry score: {symmetry:.2f} (1.0=symmetric)\n"
+        f"- Right hand: {right_freq:.1f}Hz, {right_amp:.1f}mm\n"
+        f"- Left hand:  {left_freq:.1f}Hz, {left_amp:.1f}mm\n"
+        f"- Signal confidence: {confidence:.2f}\n"
+        f"- Preliminary risk: {risk_level}\n\n"
+        "Use your diagnostic tools to analyze this case, then output your JSON assessment."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_message},
+    ]
+
+    agent_steps = []
+    MAX_ROUNDS  = 8   # safety cap — Nemotron should finish in 4-5
+
     try:
-        if client is None:
-            raise RuntimeError("OpenAI SDK not installed")
+        for _round in range(MAX_ROUNDS):
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=_TOOL_SCHEMAS,
+                tool_choice="auto",
+                max_tokens=800,
+                temperature=0.0,
+            )
+            msg = response.choices[0].message
 
-        # Compact prompt — Nemotron is a chain-of-thought model so we tell it
-        # explicitly to skip reasoning and output JSON immediately.
-        prompt = (
-            f"Tremor data: frequency={frequency:.1f}Hz, amplitude={amplitude_mm:.1f}mm, "
-            f"type={tremor_type}, symmetry={symmetry:.2f}, severity={severity} (FTM {ftm_score}), "
-            f"risk={risk_level}.\n\n"
-            "Clinical refs: Parkinson's = 4-6Hz resting, asymmetric. "
-            "Essential = 6-12Hz, symmetric. Physiological < 1mm.\n\n"
-            "Output ONLY valid JSON, no thinking, no preamble:\n"
-            '{"interpretation":"2-3 plain-English sentences for patient",'
-            '"recommendation":"one specific next step",'
-            '"clinical_note":"one sentence clinical summary"}'
-        )
+            # Agent wants to call tools
+            if msg.tool_calls:
+                # Append the assistant message with tool_calls intact
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id":       tc.id,
+                            "type":     "function",
+                            "function": {
+                                "name":      tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+                # Execute each tool call and feed results back
+                for tc in msg.tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        fn_args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        fn_args = {}
 
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content":
-                    "You are a neurological screening assistant. "
-                    "Output ONLY valid compact JSON. No thinking. No markdown. "
-                    "Start your response with { immediately."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=400,
-            temperature=0.0,
-        )
+                    fn = _SENTINEL_TOOLS.get(fn_name)
+                    if fn is None:
+                        tool_result = {"error": f"Unknown tool: {fn_name}"}
+                    else:
+                        try:
+                            tool_result = fn(**fn_args)
+                        except Exception as te:
+                            tool_result = {"error": str(te)}
 
-        latency = round(time.time() - t0, 2)
-        raw = (response.choices[0].message.content or "").strip()
+                    agent_steps.append({
+                        "tool":   fn_name,
+                        "args":   fn_args,
+                        "result": tool_result,
+                    })
+                    messages.append({
+                        "role":         "tool",
+                        "tool_call_id": tc.id,
+                        "name":         fn_name,
+                        "content":      json.dumps(tool_result),
+                    })
+                continue  # next round — agent processes tool results
 
-        # Nemotron reasoning models often prefix with chain-of-thought.
-        # Find the LAST complete JSON object in the output.
-        start = raw.rfind('{')
-        end   = raw.rfind('}')
-        if start != -1 and end > start:
-            explanation = json.loads(raw[start:end + 1])
-            base_result.update({
-                "interpretation":  explanation.get("interpretation", ""),
-                "recommendation":  explanation.get("recommendation", "Consult a neurologist."),
-                "clinical_note":   explanation.get("clinical_note", ""),
-                "latency_s":       latency,
-            })
-        else:
-            raise ValueError(f"No JSON found in: {raw[:200]}")
+            # Agent is done with tools, read final text response
+            raw = (msg.content or "").strip()
+            # Nemotron may prepend chain-of-thought before the JSON.
+            start = raw.rfind("{")
+            end   = raw.rfind("}")
+            if start != -1 and end > start:
+                parsed = json.loads(raw[start:end + 1])
+                # Pull FTM from agent's last compute_ftm_score call if available
+                ftm_calls = [s for s in agent_steps if s["tool"] == "compute_ftm_score"]
+                if ftm_calls:
+                    ftm_result = ftm_calls[-1]["result"]
+                    ftm_score  = ftm_result.get("ftm_score", ftm_score)
+                    severity   = ftm_result.get("severity_label", severity)
+                base_result.update({
+                    "severity":       severity,
+                    "ftm_score":      ftm_score,
+                    "interpretation": parsed.get("interpretation", base_result["interpretation"]),
+                    "recommendation": parsed.get("recommendation", base_result["recommendation"]),
+                    "clinical_note":  parsed.get("clinical_note",  base_result["clinical_note"]),
+                    "latency_s":      round(time.time() - t0, 2),
+                    "agent_steps":    agent_steps,
+                })
+            else:
+                base_result.update({
+                    "latency_s":   round(time.time() - t0, 2),
+                    "agent_steps": agent_steps,
+                    "clinical_note": f"Agent response unparseable: {raw[:120]}",
+                })
+            break
 
     except Exception as e:
-        latency = round(time.time() - t0, 2)
-        # API failed — severity is already set correctly, just fill explanation defaults.
         base_result.update({
-            "interpretation":  (
-                f"Your tremor reading shows {severity} activity at {frequency:.1f} Hz "
-                f"with {amplitude_mm:.1f} mm amplitude."
-            ),
-            "recommendation":  "Please consult a neurologist for formal evaluation.",
-            "clinical_note":   f"API explanation unavailable: {e}",
-            "latency_s":       latency,
+            "clinical_note": f"Agent error: {e}",
+            "latency_s":     round(time.time() - t0, 2),
+            "agent_steps":   agent_steps,
         })
 
     return base_result

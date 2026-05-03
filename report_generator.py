@@ -129,7 +129,6 @@ def generate_report_text(features, severity: str, ftm_score: int) -> dict:
         "Measurements:\n"
         f"  Amplitude         : {features.amplitude_mm} mm\n"
         f"  Dominant Frequency: {features.dominant_frequency_hz} Hz\n"
-        f"  Tremor Type       : {features.tremor_type}\n"
         f"  Symmetry Score    : {features.symmetry_score} (1.0 = symmetric)\n"
         f"  Right Hand        : {features.right_hand_frequency} Hz, {features.right_hand_amplitude} mm\n"
         f"  Left Hand         : {features.left_hand_frequency} Hz, {features.left_hand_amplitude} mm\n"
@@ -317,7 +316,7 @@ def build_pdf(features, severity: str, ftm_score: int, report: dict) -> bytes:
     row1.setStyle(_no_pad)
 
     row2 = Table(
-        [[mini("Tremor Type", features.tremor_type.capitalize()),
+        [[mini("Risk Level", features.risk_level.capitalize()),
           Spacer(GAP, 1),
           mini("Symmetry", f"{features.symmetry_score}", "/ 1.0")]],
         colWidths=[CW, GAP, CW],
