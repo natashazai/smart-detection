@@ -689,7 +689,7 @@ def main() -> None:
             f"padding:28px 32px;margin-bottom:24px;'>"
             f"<p style='color:#64748b;font-size:11px;font-weight:600;letter-spacing:0.1em;"
             f"text-transform:uppercase;margin:0 0 6px 0;'>Assessment Result</p>"
-            f"<p style='color:{color};font-size:36px;font-weight:700;margin:0;'>{severity.upper()}</p>"
+            f"<p style='color:{color};font-size:36px;font-weight:700;margin:0;'>{severity.lower()}</p>"
             f"<p style='color:#94a3b8;font-size:13px;margin:4px 0 0 0;'>Fahn-Tolosa-Marin Grade {ftm} / 4</p>"
             f"</div>",
             unsafe_allow_html=True,
