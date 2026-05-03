@@ -21,7 +21,7 @@ from report_generator import generate_report
 load_dotenv()
 
 nemotron_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
+    base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 MODEL = "nvidia/nemotron-3-super-120b-a12b"
@@ -107,10 +107,19 @@ def main() -> None:
     [data-testid="stSidebar"] {
         background-color: #1a3a5c;
         border-right: none;
+        padding-top: 0 !important;
+    }
+
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: 0 !important;
     }
 
     [data-testid="stSidebar"] * {
         color: #e2e8f0 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] * {
+        color: #374151 !important;
     }
 
     [data-testid="stSidebar"] .stSelectbox label,
@@ -122,7 +131,7 @@ def main() -> None:
 
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
         color: #93c5fd !important;
-        font-size: 13px !important;
+        font-size: 15px !important;
     }
 
     .block-container {
@@ -157,17 +166,30 @@ def main() -> None:
         font-weight: 600 !important;
     }
 
-    div[data-testid="stButton"] button[kind="primary"] {
-        background-color: #1a3a5c;
-        border: none;
-        border-radius: 6px;
-        font-weight: 500;
-        letter-spacing: 0.02em;
-        padding: 10px 20px;
+    /* Run Analysis button in sidebar — blue */
+    [data-testid="stSidebar"] div[data-testid="stButton"] button {
+        background-color: #2563eb !important;
+        border: none !important;
+        border-radius: 6px !important;
+        font-weight: 600 !important;
+        color: white !important;
+        padding: 10px 20px !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stButton"] button:hover {
+        background-color: #1d4ed8 !important;
     }
 
-    div[data-testid="stButton"] button[kind="primary"]:hover {
-        background-color: #1e4a7a;
+    /* Main content buttons — white with navy border */
+    .block-container div[data-testid="stButton"] button {
+        background-color: #ffffff !important;
+        border: 1.5px solid #1a3a5c !important;
+        border-radius: 6px !important;
+        font-weight: 600 !important;
+        color: #1a3a5c !important;
+        padding: 10px 20px !important;
+    }
+    .block-container div[data-testid="stButton"] button:hover {
+        background-color: #eff6ff !important;
     }
 
     .stDownloadButton button {
@@ -189,14 +211,27 @@ def main() -> None:
         color: #1e40af;
     }
 
-       hr {
+    hr {
         border-color: #e2e8f0;
     }
 
     [data-testid="stToolbar"] { display: none; }
     [data-testid="stDecoration"] { display: none; }
     [data-testid="stHeader"] { display: none; }
+    [data-testid="stSidebarCollapseButton"] { display: none !important; }
+    [data-testid="stSidebarCollapsedControl"] { display: none !important; }
     footer { display: none; }
+
+     [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div {
+        background-color: white !important;
+        color: #374151 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div > div {
+        color: #374151 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] span {
+        color: #374151 !important;
+    }
 
     [data-testid="stMainBlockContainer"] {
         padding-top: 0 !important;
@@ -205,7 +240,7 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Top header bar ────────────────────────────────────────────
+    # ── Top header bar ─────────────────────────────────────────────
     st.markdown("""
     <div style='background:#1a3a5c;padding:16px 32px;margin:0 0 32px 0;border-radius:8px;
                 display:flex;align-items:center;justify-content:space-between;'>
@@ -222,12 +257,15 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Sidebar ───────────────────────────────────────────────────
+    # ── Sidebar ────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("""
-        <div style='padding:8px 0 20px 0;border-bottom:1px solid #2d5a8e;margin-bottom:20px;'>
-            <p style='color:#93c5fd;font-size:11px;letter-spacing:0.1em;
-                      text-transform:uppercase;margin:0;'>Patient Assessment</p>
+        <div style='background:#1a3a5c;padding:20px 16px 16px 16px;
+                    margin:-60px -16px 20px -16px;
+                    border-bottom:1px solid #2d5a8e;'>
+            <p style='color:#93c5fd;font-size:13px;letter-spacing:0.1em;
+                      text-transform:uppercase;margin:0 0 4px 0;font-weight:700;'>SENTINEL</p>
+            <p style='color:#4a7aaa;font-size:14px;margin:0;'>Patient Assessment Panel</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -248,15 +286,7 @@ def main() -> None:
         st.markdown("<br/>", unsafe_allow_html=True)
         run = st.button("Run Analysis", type="primary", use_container_width=True)
 
-        st.markdown("<br/><br/>", unsafe_allow_html=True)
-        st.markdown("""
-        <p style='color:#4a7aaa;font-size:10px;text-align:center;line-height:1.5;'>
-            ⚠ For screening purposes only.<br/>
-            Not a substitute for medical diagnosis.
-        </p>
-        """, unsafe_allow_html=True)
-
-    # session state
+    # ── Session state ──────────────────────────────────────────────
     for key in ["last_features", "last_severity", "last_ftm", "last_explanation"]:
         if key not in st.session_state:
             st.session_state[key] = None
@@ -288,7 +318,6 @@ def main() -> None:
         color       = SEVERITY_COLOR.get(severity, "#6b7280")
         bg          = SEVERITY_BG.get(severity, "#f9fafb")
 
-        # ── Assessment result card ────────────────────────────────
         st.markdown(
             f"""<div style='background:white;border:1px solid #e2e8f0;
                             border-left:5px solid {color};border-radius:8px;
@@ -318,7 +347,6 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-        # ── Metrics ───────────────────────────────────────────────
         st.markdown("#### Signal Measurements")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Amplitude",  f"{features.amplitude_mm} mm")
@@ -328,7 +356,6 @@ def main() -> None:
 
         st.markdown("<br/>", unsafe_allow_html=True)
 
-        # ── Explanation ───────────────────────────────────────────
         st.markdown("#### Clinical Interpretation")
         st.markdown(
             f"""<div style='background:white;border:1px solid #e2e8f0;
@@ -342,7 +369,6 @@ def main() -> None:
 
         st.markdown("<br/>", unsafe_allow_html=True)
 
-        # ── Report section ────────────────────────────────────────
         st.markdown("#### Clinical Report")
         st.markdown(
             """<div style='background:white;border:1px solid #e2e8f0;
@@ -370,7 +396,6 @@ def main() -> None:
                 )
 
     else:
-        # ── Empty state ───────────────────────────────────────────
         st.markdown(
             """<div style='background:white;border:1px solid #e2e8f0;border-radius:8px;
                            padding:80px 40px;text-align:center;margin-top:40px;'>
@@ -384,6 +409,15 @@ def main() -> None:
             </div>""",
             unsafe_allow_html=True,
         )
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style='text-align:center;border-top:1px solid #e2e8f0;padding:20px 0 8px 0;'>
+        <p style='color:#64748b;font-size:11px;margin:0;'>
+            ⚠ For screening purposes only · Not a substitute for medical diagnosis
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
