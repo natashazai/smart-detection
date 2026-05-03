@@ -1,5 +1,5 @@
 """
-SENTINEL -- Clinical Report Generator
+Early Parkinson's Screening -- Clinical Report Generator
 ======================================
 Asks Nemotron 120B to write a structured clinical report
 and saves it as a polished PDF the patient can bring to a doctor.
@@ -213,7 +213,7 @@ def build_pdf(features, severity: str, ftm_score: int, report: dict) -> bytes:
     # Header
     # =========================================================================
     hdr = Table([[
-        Paragraph("<b>SENTINEL</b>",
+        Paragraph("<b>Early Parkinson's Screening</b>",
             ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=22,
                            textColor=_INK, leading=26)),
         Paragraph(
@@ -448,7 +448,7 @@ def build_pdf(features, severity: str, ftm_score: int, report: dict) -> bytes:
     ))
     story.append(Spacer(1, 4))
     story.append(Paragraph(
-        "SENTINEL  x  Nemotron 120B  -  Always consult a qualified neurologist.",
+        "Early Parkinson's Screening  x  Nemotron 120B  -  Always consult a qualified neurologist.",
         ParagraphStyle("foot", fontName="Helvetica", fontSize=7,
                        textColor=colors.HexColor("#9ca3af"), leading=11,
                        alignment=TA_CENTER),
