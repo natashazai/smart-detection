@@ -455,7 +455,7 @@ MODEL = "nvidia/nemotron-3-super-120b-a12b"
 # Sends amplitude to Nemotron 120B and gets back
 # FTM severity classification in caps for the UI.
 # ─────────────────────────────────────────────
-def classify_with_nemotron(amplitude_mm: float) -> dict:
+def classify_with_nemotron(amplitude_mm: float, frequency_hz: float = None, symmetry: float = None) -> dict:
     t0 = time.time()
     try:
         if client is None:
@@ -465,17 +465,22 @@ def classify_with_nemotron(amplitude_mm: float) -> dict:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a clinical AI. Classify tremor severity by amplitude using the FTM scale.
+                    "content": """You are a clinical AI. Classify tremor severity and risk.
 
-FTM Severity Scale:
+FTM Severity Scale (by amplitude):
   none     = < 0.1 mm
   mild     = 0.1-5 mm    (FTM grade 1)
   moderate = 5-10 mm     (FTM grade 2)
   marked   = 10-20 mm    (FTM grade 3)
   severe   = > 20 mm     (FTM grade 4)
 
+Risk level:
+  low      = physiological frequency (8-12 Hz), symmetric
+  moderate = essential tremor range (4-8 Hz) OR asymmetric (symmetry < 0.7)
+  high     = Parkinson's range (3-6 Hz) AND asymmetric (symmetry < 0.6)
+
 Respond with ONLY this JSON, no thinking, no explanation:
-{"severity": "none|mild|moderate|marked|severe", "ftm_score": 0}"""
+{"severity": "none|mild|moderate|marked|severe", "ftm_score": 0, "risk_level": "low|moderate|high"}"""
                 },
                 {
                     "role": "user",
