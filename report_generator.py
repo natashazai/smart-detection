@@ -317,7 +317,7 @@ def build_pdf(features, severity: str, ftm_score: int, report: dict) -> bytes:
     row1.setStyle(_no_pad)
 
     row2 = Table(
-        [[mini("Tremor Type", features.tremor_type.capitalize()),
+        [[mini("Risk Level", features.risk_level.capitalize()),
           Spacer(GAP, 1),
           mini("Symmetry", f"{features.symmetry_score}", "/ 1.0")]],
         colWidths=[CW, GAP, CW],
