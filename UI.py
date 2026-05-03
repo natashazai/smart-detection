@@ -7,9 +7,11 @@ Run with:
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -199,14 +201,71 @@ def render_processing_screen(slot, stage: str, detail: str) -> None:
 
 def render_pdf_open_link(slot, pdf_bytes: bytes) -> None:
     encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
-    slot.markdown(
-        (
-            f'<a class="report-open-link" href="data:application/pdf;base64,{encoded_pdf}" target="_blank" '
-            'rel="noopener noreferrer" aria-label="Open SENTINEL PDF report in a new tab">'
-            "Open PDF Report</a>"
-        ),
-        unsafe_allow_html=True,
-    )
+    component_html = f"""
+    <!doctype html>
+    <html>
+    <head>
+    <style>
+    body {{
+        margin: 0;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .report-open-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 42px;
+        background-color: #ffffff;
+        border: 1.5px solid #1a3a5c;
+        border-radius: 6px;
+        color: #1a3a5c;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.2;
+        padding: 10px 20px;
+        text-decoration: none;
+        box-sizing: border-box;
+        cursor: pointer;
+    }}
+    .report-open-link:hover {{
+        background-color: #eff6ff;
+    }}
+    </style>
+    </head>
+    <body>
+    <a id="open-report" class="report-open-link" target="_blank" rel="noopener noreferrer">
+        Open PDF Report
+    </a>
+    <script>
+    const pdfBase64 = {json.dumps(encoded_pdf)};
+    const byteCharacters = atob(pdfBase64);
+    const byteArrays = [];
+    const sliceSize = 1024;
+
+    for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {{
+        const slice = byteCharacters.slice(offset, offset + sliceSize);
+        const byteNumbers = new Array(slice.length);
+        for (let i = 0; i < slice.length; i += 1) {{
+            byteNumbers[i] = slice.charCodeAt(i);
+        }}
+        byteArrays.push(new Uint8Array(byteNumbers));
+    }}
+
+    const pdfBlob = new Blob(byteArrays, {{ type: "application/pdf" }});
+    const pdfUrl = URL.createObjectURL(pdfBlob);
+    document.getElementById("open-report").href = pdfUrl;
+    window.addEventListener("pagehide", () => URL.revokeObjectURL(pdfUrl));
+    </script>
+    </body>
+    </html>
+    """
+    with slot.container():
+        components.html(
+            component_html,
+            height=48,
+            scrolling=False,
+        )
 
 
 def render_report_loading(slot) -> None:
