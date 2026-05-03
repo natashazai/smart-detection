@@ -1,13 +1,10 @@
 """
-SENTINEL — Tremor Analysis Module
+Tremor Analysis Module
 ===================================
-Person 2: Signal Processing & Feature Extraction
-Person 3 (Natasha): LLM Clinical Interpretation
 
 Input:  XYZ landmark time series (from Person 1 / OAK-D)
 Output: Structured feature dict + Nemotron severity classification
 
-Mock data is used until Person 1 has the camera ready.
 """
 
 import numpy as np
@@ -1122,39 +1119,3 @@ def classify_with_nemotron(features: "TremorFeatures | float") -> dict:
         })
 
     return base_result
-
-
-
-
-if __name__ == "__main__":
-    print("=" * 55)
-    print("  SENTINEL — Tremor Analysis (Mock Mode)")
-    print("=" * 55)
-
-    # Simulate a concerning Parkinson's profile
-    print("\n[1] Generating mock hand data (Parkinson's profile)...")
-    hand_data = generate_mock_hand_data(
-        duration_seconds=30,
-        sample_rate=30,
-        tremor_frequency=5.2,    # in Parkinson's range
-        tremor_amplitude=4.0,    # noticeable amplitude
-        noise_level=0.5
-    )
-
-    print("[2] Running tremor analysis...")
-    features = analyze_tremor(hand_data)
-
-    print("\n── Extracted Features ──────────────────────────")
-    print(json.dumps(asdict(features), indent=2))
-
-    # NATASHA'S PART — send to Nemotron and print result
-    print("\n── Nemotron Severity Classification (Natasha) ──")
-    result   = classify_with_nemotron(features.amplitude_mm)
-    severity = result.get("severity", "error").upper()
-    ftm      = result.get("ftm_score", "?")
-    latency  = result.get("latency_s", "?")
-
-    print(f"  Amplitude : {features.amplitude_mm} mm")
-    print(f"  SEVERITY  : {severity}  (FTM grade {ftm})  [{latency}s]")
-
-    print("\n✓ Done")
