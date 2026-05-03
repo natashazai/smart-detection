@@ -1,326 +1,211 @@
-"""Streamlit dashboard for the tremor detector.
+"""Streamlit dashboard for SENTINEL tremor analysis.
 
 Run with:
-    UV_CACHE_DIR=.uv-cache UV_PYTHON_INSTALL_DIR=.uv-python \
-        uv run streamlit run ui/dashboard.py
+    streamlit run dashboard.py
+
+Make sure tremor_analysis.py and report_generator.py are in the same folder.
 """
 
 from __future__ import annotations
 
-import sys
+import json
 import time
-from pathlib import Path
-
-import numpy as np
 import streamlit as st
+from openai import OpenAI
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-import tremor_detector as td
-
-TRACKED_POINTS = (
-    "index_tip",
-    "middle_tip",
-    "thumb_tip",
-    "ring_tip",
-    "pinky_tip",
-    "hand_center",
+from tremor_analysis import (
+    generate_mock_hand_data,
+    analyze_tremor,
+    classify_with_nemotron,
 )
-DEFAULT_TRACKED_POINTS = ("index_tip", "middle_tip", "thumb_tip")
-SETTLING_SECONDS = 2.0
-PRESETS = {
-    "Balanced": {
-        "min_signal_seconds": 12.0,
-        "min_confidence": 0.55,
-        "min_amplitude": 0.05,
-        "agreement_count": 2,
-    },
-    "Strict": {
-        "min_signal_seconds": 15.0,
-        "min_confidence": 0.65,
-        "min_amplitude": 0.08,
-        "agreement_count": 2,
-    },
-    "Sensitive": {
-        "min_signal_seconds": 8.0,
-        "min_confidence": 0.45,
-        "min_amplitude": 0.04,
-        "agreement_count": 2,
-    },
+from report_generator import generate_report
+
+SEVERITY_COLOR = {
+    "none":     "#22c55e",
+    "mild":     "#84cc16",
+    "moderate": "#f59e0b",
+    "marked":   "#f97316",
+    "severe":   "#ef4444",
+    "unknown":  "#6b7280",
+    "error":    "#6b7280",
 }
 
+SCENARIOS = [
+    {"name": "Healthy baseline",      "frequency": 10.0, "amplitude": 0.05, "noise": 0.3},
+    {"name": "Mild essential tremor", "frequency":  7.0, "amplitude": 2.0,  "noise": 0.5},
+    {"name": "Moderate Parkinson's",  "frequency":  5.2, "amplitude": 4.0,  "noise": 0.5},
+    {"name": "Severe tremor",         "frequency":  4.5, "amplitude": 15.0, "noise": 1.0},
+]
 
-def init_state() -> None:
-    st.session_state.setdefault("running", False)
-    st.session_state.setdefault("buffers", None)
-    st.session_state.setdefault("last_metrics", {})
-    st.session_state.setdefault("last_assessment", None)
-    st.session_state.setdefault("hand_present_since", None)
-    st.session_state.setdefault("was_hand_present", False)
-    if not isinstance(st.session_state.last_metrics, dict):
-        st.session_state.last_metrics = {}
-    if st.session_state.buffers is not None and not isinstance(st.session_state.buffers, dict):
-        st.session_state.buffers = None
-
-
-def reset_buffers(window_seconds: float, points: tuple[str, ...]) -> None:
-    st.session_state.buffers = {
-        point: td.MotionBuffer(window_seconds)
-        for point in points
-    }
-    st.session_state.last_metrics = {}
-    st.session_state.last_assessment = None
-    st.session_state.hand_present_since = None
-    st.session_state.was_hand_present = False
+# Nemotron client for explanation
+nemotron_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key="",
+)
+MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 
-def ensure_buffers(window_seconds: float, points: tuple[str, ...]) -> dict[str, td.MotionBuffer]:
-    if st.session_state.buffers is None:
-        reset_buffers(window_seconds, points)
-    buffers: dict[str, td.MotionBuffer] = st.session_state.buffers
-    for point in points:
-        buffers.setdefault(point, td.MotionBuffer(window_seconds))
-        buffers[point].window_seconds = window_seconds
-    for point in list(buffers):
-        if point not in points:
-            del buffers[point]
-    return buffers
-
-
-def render_waveform_image(waveform: np.ndarray, width: int = 560, height: int = 180) -> np.ndarray:
-    canvas = np.full((height, width, 3), 18, dtype=np.uint8)
-    if td.cv2 is not None:
-        td.draw_waveform(canvas, waveform, (0, 0), (width, height))
-        return td.cv2.cvtColor(canvas, td.cv2.COLOR_BGR2RGB)
-    return canvas
-
-
-def format_frequency(frequency: float | None) -> str:
-    return "—" if frequency is None else f"{frequency:0.2f} Hz"
-
-
-def render_metrics(slot, metrics: td.TremorMetrics, point_name: str) -> None:
-    with slot.container():
-        cols = st.columns(2)
-        cols[0].metric("Dominant motion", format_frequency(metrics.dominant_frequency_hz))
-        cols[1].metric("Tremor candidate", format_frequency(metrics.tremor_frequency_hz))
-
-        st.progress(
-            float(np.clip(metrics.confidence, 0.0, 1.0)),
-            text=f"Confidence — {metrics.confidence * 100:0.0f}%",
-        )
-        st.caption(f"Amplitude score: {metrics.amplitude_score:0.1f}/100")
-
-        if metrics.is_tremor_candidate:
-            st.success(metrics.classification)
-        elif metrics.classification == td.CLASS_COLLECTING:
-            st.info(metrics.classification)
-        else:
-            st.warning(metrics.classification)
-
-        st.image(
-            render_waveform_image(metrics.waveform),
-            channels="RGB",
-            use_container_width=True,
-        )
-
-
-def run_capture_loop(
-    *,
-    camera_source: str,
-    camera_index: int,
-    points: tuple[str, ...],
-    window_seconds: float,
-    config: td.TremorAnalysisConfig,
-    min_detection_confidence: float,
-    min_tracking_confidence: float,
-    frame_slot,
-    metrics_slot,
-    status_slot,
-) -> None:
-    if not td.load_runtime_dependencies():
-        status_slot.error("OpenCV / MediaPipe failed to load.")
-        st.session_state.running = False
-        return
-
-    cv2 = td.cv2
-    mp = td.mp
-
+def get_explanation(features, severity: str, ftm: int) -> str:
+    """Ask Nemotron to explain the result in plain English for the patient."""
     try:
-        capture = td.open_frame_source(camera_source, camera_index)
-    except RuntimeError as exc:
-        status_slot.error(str(exc))
-        st.session_state.running = False
-        return
-
-    buffers = ensure_buffers(window_seconds, points)
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    mp_styles = mp.solutions.drawing_styles
-
-    try:
-        with mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            model_complexity=1,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        ) as hands:
-            while st.session_state.running:
-                ok, camera_frame = capture.read()
-                if not ok:
-                    status_slot.error("Camera frame read failed.")
-                    break
-                frame = camera_frame.color
-                depth_frame = camera_frame.depth
-                now = time.perf_counter()
-
-                for buffer in buffers.values():
-                    buffer.prune(now)
-
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                rgb.flags.writeable = False
-                results = hands.process(rgb)
-                rgb.flags.writeable = True
-
-                hand_landmarks = td.choose_best_hand(results)
-                hand_present = hand_landmarks is not None
-                if hand_present and not st.session_state.was_hand_present:
-                    st.session_state.hand_present_since = now
-                if not hand_present:
-                    st.session_state.hand_present_since = None
-                st.session_state.was_hand_present = hand_present
-                settled = (
-                    st.session_state.hand_present_since is not None
-                    and now - st.session_state.hand_present_since >= SETTLING_SECONDS
-                )
-
-                if hand_landmarks is not None:
-                    mp_drawing.draw_landmarks(
-                        frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                        mp_styles.get_default_hand_landmarks_style(),
-                        mp_styles.get_default_hand_connections_style(),
+        response = nemotron_client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a friendly clinical AI explaining tremor results to a patient. Be warm, clear, and concise. Never diagnose. Always recommend seeing a doctor."
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"The patient's tremor was classified as {severity.upper()} (FTM grade {ftm}/4).\n"
+                        f"Amplitude: {features.amplitude_mm} mm, Frequency: {features.dominant_frequency_hz} Hz, "
+                        f"Symmetry: {features.symmetry_score}, Risk: {features.risk_level}.\n\n"
+                        f"Write 2-3 sentences explaining what this means in plain English. "
+                        f"What should the patient know? What should they do next? "
+                        f"Be reassuring but honest. No markdown, no bullet points, just plain text."
                     )
-                    for point in points:
-                        normalized_point, quality = td.normalized_motion_point(
-                            hand_landmarks, point, depth_frame,
-                        )
-                        buffers[point].add(td.MotionSample(
-                            timestamp=now,
-                            x=float(normalized_point[0]),
-                            y=float(normalized_point[1]),
-                            quality=quality,
-                            z=float(normalized_point[2]) if normalized_point.size >= 3 else None,
-                        ))
-
-                metrics_by_point = {}
-                for point in points:
-                    timestamps, positions, qualities = buffers[point].as_arrays()
-                    metrics_by_point[point] = td.analyze_tremor(
-                        timestamps=timestamps,
-                        positions=positions,
-                        qualities=qualities,
-                        min_freq=config.measurement_min_freq,
-                        max_freq=config.measurement_max_freq,
-                        tremor_min_freq=config.tremor_min_freq,
-                        tremor_max_freq=config.tremor_max_freq,
-                        min_signal_seconds=config.min_signal_seconds,
-                        min_confidence=config.min_confidence,
-                        min_amplitude=config.min_amplitude,
-                        min_tremor_power_ratio=config.min_tremor_power_ratio,
-                        classification_enabled=settled,
-                    )
-                st.session_state.last_metrics = metrics_by_point
-
-                display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_slot.image(display, channels="RGB", use_container_width=True)
-
-                # show first tracked point metrics
-                first_point = points[0]
-                render_metrics(metrics_slot, metrics_by_point[first_point], first_point)
-                status_slot.caption("● recording")
-    finally:
-        capture.release()
-        status_slot.caption("○ idle")
+                }
+            ],
+            max_tokens=300,
+            temperature=0.3,
+        )
+        content = response.choices[0].message.content
+        return content.strip() if content else "Unable to generate explanation."
+    except Exception as e:
+        return f"Could not generate explanation: {e}"
 
 
 def main() -> None:
-    st.set_page_config(page_title="NeuroTrack Tremor Dashboard", layout="wide")
-    init_state()
+    st.set_page_config(page_title="SENTINEL — Tremor Monitor", layout="wide")
 
-    st.title("NeuroTrack Tremor Dashboard")
-    st.caption("Live webcam tremor analysis. Prototype only — not a medical diagnostic device.")
+    st.markdown("""
+    <style>
+    [data-testid="stAppViewContainer"] { background: #0a0f1e; }
+    [data-testid="stSidebar"] { background: #0f172a; }
+    h1, h2, h3 { color: #e2e8f0 !important; }
+    p, label { color: #94a3b8 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.title("Tremor Monitor")
+    st.caption("Nemotron 120B severity classification · Not a medical diagnostic device")
+    st.divider()
 
     with st.sidebar:
-        st.subheader("Capture")
-        camera_source = st.selectbox("Source", ("webcam", "oak"), index=0)
-        camera_index = st.number_input("Camera index", min_value=0, max_value=8, value=0, step=1)
-        points = st.multiselect("Tracked points", TRACKED_POINTS, default=list(DEFAULT_TRACKED_POINTS))
-        if not points:
-            st.warning("Select at least one tracked point.")
-            points = [TRACKED_POINTS[0]]
-        selected_points = tuple(points)
-        window_seconds = st.slider("Analysis window (s)", 5.0, 40.0, 20.0, 1.0)
+        st.subheader("Test Scenario")
+        scenario_name = st.selectbox(
+            "Select a tremor profile",
+            [s["name"] for s in SCENARIOS],
+        )
+        scenario = next(s for s in SCENARIOS if s["name"] == scenario_name)
 
-        st.subheader("Classifier")
-        preset_name = st.selectbox("Preset", tuple(PRESETS), index=0)
-        preset = PRESETS[preset_name]
+        st.subheader("Mock Data Parameters")
+        st.caption(f"Frequency : {scenario['frequency']} Hz")
+        st.caption(f"Amplitude : {scenario['amplitude']} mm")
+        st.caption(f"Noise     : {scenario['noise']}")
 
-        config = td.TremorAnalysisConfig(
-            min_signal_seconds=float(preset["min_signal_seconds"]),
-            min_confidence=float(preset["min_confidence"]),
-            min_amplitude=float(preset["min_amplitude"]),
-            agreement_count=int(preset["agreement_count"]),
+        run = st.button("▶ Run Analysis", type="primary", use_container_width=True)
+
+    # store results in session
+    for key in ["last_features", "last_severity", "last_ftm", "last_explanation"]:
+        if key not in st.session_state:
+            st.session_state[key] = None
+
+    if run:
+        with st.spinner("Running analysis and calling Nemotron 120B..."):
+            hand_data = generate_mock_hand_data(
+                duration_seconds=30, sample_rate=30,
+                tremor_frequency=scenario["frequency"],
+                tremor_amplitude=scenario["amplitude"],
+                noise_level=scenario["noise"],
+            )
+            features = analyze_tremor(hand_data)
+            result   = classify_with_nemotron(features.amplitude_mm)
+            severity = result.get("severity", "unknown")
+            ftm      = result.get("ftm_score", "?")
+            explanation = get_explanation(features, severity, ftm)
+
+        st.session_state.last_features    = features
+        st.session_state.last_severity    = severity
+        st.session_state.last_ftm         = ftm
+        st.session_state.last_explanation = explanation
+
+    if st.session_state.last_features:
+        features    = st.session_state.last_features
+        severity    = st.session_state.last_severity
+        ftm         = st.session_state.last_ftm
+        explanation = st.session_state.last_explanation
+        color       = SEVERITY_COLOR.get(severity, "#6b7280")
+
+        # severity badge
+        st.markdown(
+            f"""<div style='background:#0f172a;border:2px solid {color};border-radius:16px;
+                            padding:40px;text-align:center;margin-bottom:24px;'>
+                <p style='color:#94a3b8;font-size:13px;letter-spacing:3px;
+                          text-transform:uppercase;margin:0 0 12px 0;'>
+                    Nemotron 120B Assessment
+                </p>
+                <p style='color:{color};font-size:72px;font-weight:900;
+                          letter-spacing:6px;margin:0;line-height:1;'>
+                    {severity.upper()}
+                </p>
+                <p style='color:#64748b;font-size:16px;margin:14px 0 0 0;'>
+                    FTM Grade {ftm} / 4
+                </p>
+            </div>""",
+            unsafe_allow_html=True,
         )
 
-        st.subheader("MediaPipe thresholds")
-        min_detection_confidence = st.slider("Detection", 0.1, 0.95, 0.7, 0.05)
-        min_tracking_confidence = st.slider("Tracking", 0.1, 0.95, 0.7, 0.05)
+        # metrics row
+        st.subheader("Signal Features")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Amplitude",  f"{features.amplitude_mm} mm")
+        col2.metric("Frequency",  f"{features.dominant_frequency_hz} Hz")
+        col3.metric("Symmetry",   f"{features.symmetry_score}")
+        col4.metric("Risk",       features.risk_level.upper())
+
+        # Nemotron explanation
+        st.subheader("What This Means")
+        st.markdown(
+            f"""<div style='background:#0f172a;border:1px solid #1e293b;border-radius:12px;
+                            padding:20px 24px;'>
+                <p style='color:#cbd5e1;font-size:15px;line-height:1.7;margin:0;'>
+                    {explanation}
+                </p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
         st.divider()
-        start_col, reset_col = st.columns(2)
-        if start_col.button(
-            "Stop" if st.session_state.running else "Start",
-            type="primary",
-            use_container_width=True,
-        ):
-            st.session_state.running = not st.session_state.running
-            if st.session_state.running and st.session_state.buffers is None:
-                reset_buffers(window_seconds, selected_points)
-            st.rerun()
-        if reset_col.button("Reset buffer", use_container_width=True):
-            reset_buffers(window_seconds, selected_points)
-            st.rerun()
 
-    feed_col, metrics_col = st.columns([3, 2])
-    with feed_col:
-        st.subheader("Live feed")
-        frame_slot = st.empty()
-        status_slot = st.empty()
-    with metrics_col:
-        st.subheader("Analysis")
-        metrics_slot = st.empty()
+        # report section
+        st.subheader("Clinical Report")
+        st.caption("Generate a PDF report you can bring to your doctor.")
 
-    if st.session_state.running:
-        run_capture_loop(
-            camera_source=camera_source,
-            camera_index=int(camera_index),
-            points=selected_points,
-            window_seconds=float(window_seconds),
-            config=config,
-            min_detection_confidence=float(min_detection_confidence),
-            min_tracking_confidence=float(min_tracking_confidence),
-            frame_slot=frame_slot,
-            metrics_slot=metrics_slot,
-            status_slot=status_slot,
-        )
+        if st.button("Generate Report", type="primary"):
+            with st.spinner("Nemotron is writing your clinical report..."):
+                pdf_bytes = generate_report(features, severity, ftm)
+
+            st.success("Report ready!")
+            st.download_button(
+                label="⬇ Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"sentinel_tremor_report_{severity}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
     else:
-        frame_slot.info("Press **Start** in the sidebar to begin webcam capture.")
-        status_slot.caption("○ idle")
-        metrics_slot.caption("Metrics will appear once capture starts.")
+        st.markdown(
+            """<div style='background:#0f172a;border:1px solid #1e293b;border-radius:16px;
+                           padding:60px;text-align:center;'>
+                <p style='color:#334155;font-size:18px;margin:0;'>
+                    Select a scenario and press Run Analysis
+                </p>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
