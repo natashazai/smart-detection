@@ -636,7 +636,9 @@ def hand_landmarks_to_xyz(
         pixel_y = float(landmark.y) * height
         depth_mm = depths[idx] if depths[idx] is not None else default_depth
         if depth_mm is None:
-            output[idx] = (pixel_x, pixel_y, float(landmark.z) * width)
+            # Store normalized coords (0-1) so downstream amplitude is in a
+            # consistent unit. analyze_tremor converts to mm via hand-size calibration.
+            output[idx] = (float(landmark.x), float(landmark.y), float(landmark.z))
             continue
         if depths[idx] is not None:
             depth_hits += 1

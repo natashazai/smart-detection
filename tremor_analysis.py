@@ -124,7 +124,12 @@ def extract_fingertip_movement(hand_landmarks: np.ndarray) -> np.ndarray:
 
 def compute_dominant_frequency(signal_xyz: np.ndarray, sample_rate: float) -> tuple[float, float]:
     """
-    Runs FFT on combined XYZ signal.
+    Runs FFT on each XYZ axis separately and averages the power spectra.
+
+    Using np.linalg.norm(XYZ) before FFT doubles frequencies because
+    ||sin(2πft)||² ∝ (1 − cos(4πft)), so 5 Hz would appear as 10 Hz.
+    Per-axis FFT with averaged spectra avoids this.
+
     Returns (dominant_frequency_hz, confidence).
 
     Parkinson's tremor: 4–6 Hz resting
@@ -132,51 +137,60 @@ def compute_dominant_frequency(signal_xyz: np.ndarray, sample_rate: float) -> tu
     Physiological:      8–12 Hz (everyone has this at very low amplitude)
     """
     N = len(signal_xyz)
-    if N < 4 or sample_rate <= 0:
+    if N < 4 or sample_rate <= 0 or signal_xyz.ndim < 2:
         return 0.0, 0.0
 
-    # Combine XYZ into single magnitude signal
-    magnitude = np.linalg.norm(signal_xyz, axis=1)
-    if not np.all(np.isfinite(magnitude)) or np.allclose(magnitude, magnitude[0]):
-        return 0.0, 0.0
-
-    # Apply Hanning window to reduce spectral leakage
-    windowed = magnitude * np.hanning(N)
-
-    # FFT
     freqs = fftfreq(N, d=1.0 / sample_rate)
-    spectrum = np.abs(fft(windowed))
-
-    # Only look at positive frequencies, cap at 20 Hz (above that = noise)
-    positive_mask = (freqs > 0.5) & (freqs < min(20.0, sample_rate / 2.0))
+    # Include sub-tremor range so we can detect and reject slow movement.
+    positive_mask = (freqs > 0.3) & (freqs < min(20.0, sample_rate / 2.0))
     freqs_pos = freqs[positive_mask]
-    spectrum_pos = spectrum[positive_mask]
-
-    if len(spectrum_pos) == 0 or spectrum_pos.sum() <= 0:
+    if len(freqs_pos) == 0:
         return 0.0, 0.0
 
-    dominant_idx = np.argmax(spectrum_pos)
-    dominant_freq = freqs_pos[dominant_idx]
+    # Average power spectra across XYZ axes
+    combined_spectrum = np.zeros(int(positive_mask.sum()))
+    valid_axes = 0
+    for axis in range(signal_xyz.shape[1]):
+        col = signal_xyz[:, axis]
+        if not np.all(np.isfinite(col)) or np.allclose(col, col[0]):
+            continue
+        windowed = col * np.hanning(N)
+        spectrum = np.abs(fft(windowed)) ** 2   # power spectrum per axis
+        combined_spectrum += spectrum[positive_mask]
+        valid_axes += 1
 
-    # Confidence = how much energy is concentrated at the dominant frequency
-    confidence = spectrum_pos[dominant_idx] / spectrum_pos.sum()
+    if valid_axes == 0 or combined_spectrum.sum() <= 0:
+        return 0.0, 0.0
 
-    return float(dominant_freq), float(np.clip(confidence * 5, 0, 1))
+    dominant_idx = int(np.argmax(combined_spectrum))
+    dominant_freq = float(freqs_pos[dominant_idx])
+
+    # Frequencies below 3 Hz are voluntary movement, not tremor.
+    # Reject after finding true dominant so harmonics of slow movement
+    # don't slip through (e.g. 2×2.81 = 5.62 Hz looks like Parkinson's).
+    if dominant_freq < 3.0:
+        return 0.0, 0.0
+
+    confidence = combined_spectrum[dominant_idx] / combined_spectrum.sum()
+    return dominant_freq, float(np.clip(confidence * 5, 0, 1))
+
 
 
 def compute_amplitude_mm(signal_xyz: np.ndarray) -> float:
     """
-    Peak-to-peak amplitude of movement.
-    OAK-D depth gives us real millimeter values.
-    With mock data, units are simulated mm.
+    Robust peak-to-peak amplitude of movement.
+    Uses 5th–95th percentile range so a single noise spike or
+    outlier frame doesn't inflate the reading.
+    OAK-D depth gives real millimeter values; image_px mode is
+    calibrated to mm before this function is called.
     """
     if signal_xyz.size == 0:
         return 0.0
     magnitude = np.linalg.norm(signal_xyz, axis=1)
     if not np.all(np.isfinite(magnitude)):
         return 0.0
-    peak_to_peak = magnitude.max() - magnitude.min()
-    return float(peak_to_peak)
+    p5, p95 = np.percentile(magnitude, [5, 95])
+    return float(p95 - p5)
 
 
 def compute_symmetry_score(
@@ -201,8 +215,10 @@ def classify_tremor_type(frequency: float, amplitude: float) -> str:
     Rough classification based on clinical literature.
 
     NOTE: This is a screening heuristic, NOT a diagnosis.
+
+    Frequency floor: < 3 Hz is voluntary movement, not tremor.
     """
-    if amplitude < 1.0:
+    if amplitude < 1.0 or frequency < 3.0:
         return "none"
     if 4.0 <= frequency <= 6.0:
         return "resting"       # Parkinson's profile
@@ -221,23 +237,29 @@ def assess_risk_level(
     Combines signals into a preliminary risk level.
     Returns (risk_level, notes_for_nemotron).
 
-    Nemotron will do the real reasoning — this is just a structured hint.
+    All scoring gates on frequency being in the clinical tremor range (≥3 Hz).
+    Sub-threshold frequency means the signal is voluntary movement, so no
+    risk points are awarded regardless of amplitude or asymmetry.
     """
     notes = []
     score = 0
+
+    # Nothing to score if frequency is below clinical tremor floor.
+    if frequency < 3.0 or tremor_type == "none":
+        return "low", "No significant tremor indicators detected."
 
     # Frequency in Parkinson's range
     if 4.0 <= frequency <= 6.0:
         score += 2
         notes.append(f"Frequency {frequency:.1f}Hz is within Parkinson's resting tremor range (4-6Hz).")
 
-    # Significant amplitude
+    # Significant amplitude — only meaningful if frequency qualifies
     if amplitude > 3.0:
         score += 1
         notes.append(f"Amplitude {amplitude:.1f}mm exceeds typical physiological threshold.")
 
-    # Asymmetric onset
-    if symmetry < 0.6:
+    # Asymmetric onset — only meaningful if frequency qualifies
+    if symmetry < 0.5:
         score += 2
         notes.append(f"Asymmetry detected (score {symmetry:.2f}) - consistent with early unilateral onset.")
 
@@ -250,6 +272,90 @@ def assess_risk_level(
 
 
 def _as_landmark_array(value: Any) -> np.ndarray:
+    if value is None:
+        return np.empty((0, 21, 3), dtype=np.float64)
+    landmarks = np.asarray(value, dtype=np.float64)
+    if landmarks.size == 0:
+        return np.empty((0, 21, 3), dtype=np.float64)
+    if landmarks.ndim != 3 or landmarks.shape[1:] != (21, 3):
+        raise ValueError(
+            f"Expected hand landmarks with shape (N, 21, 3), got {landmarks.shape}."
+        )
+    return landmarks
+
+
+def _estimate_mm_per_unit(hand_landmarks: np.ndarray) -> float:
+    """
+    When no depth camera is available, landmark coords are MediaPipe-normalized
+    (roughly 0-1 range).  We use the known anatomy of a human hand to recover
+    a scale factor: wrist (idx 0) → index MCP (idx 5) is ~65 mm on an adult.
+
+    Returns mm per coordinate unit, or 1.0 if the estimate is unreliable.
+    """
+    if hand_landmarks.size == 0 or hand_landmarks.shape[0] < 10:
+        return 1.0
+    # Use the median across all frames so one bad frame doesn't skew the scale.
+    wrist = hand_landmarks[:, 0, :]      # (N, 3)
+    index_mcp = hand_landmarks[:, 5, :]  # (N, 3)
+    dists = np.linalg.norm(index_mcp - wrist, axis=1)
+    median_dist = float(np.median(dists[dists > 1e-6]))
+    if median_dist < 1e-6:
+        return 1.0
+    WRIST_TO_INDEX_MCP_MM = 65.0
+    return WRIST_TO_INDEX_MCP_MM / median_dist
+
+
+def classify_severity_local(
+    frequency: float,
+    amplitude_mm: float,
+    tremor_type: str,
+    symmetry: float,
+    confidence: float,
+) -> tuple[str, int]:
+    """
+    Deterministic FTM-based severity classification.  This replaces the LLM
+    call for the actual grade — the LLM is kept only for plain-English
+    *explanation*.
+
+    Returns (severity_label, ftm_grade 0-4).
+
+    Clinical reasoning:
+    - Amplitude is the primary FTM driver.
+    - But amplitude alone misleads if frequency is outside the tremor range.
+      Physiological jitter at 11+ Hz with low amplitude is NOT a tremor.
+    - We reduce effective amplitude when the signal looks like noise
+      (high frequency, high symmetry, low confidence) to avoid false positives.
+    """
+    if confidence < 0.05 or amplitude_mm < 0.1 or frequency < 3.0:
+        return "none", 0
+
+    # Parkinson's profile: 4–6 Hz, asymmetric.
+    # Essential tremor:    6–12 Hz, symmetric.
+    # High freq (>12 Hz) + high symmetry → likely physiological jitter.
+    in_parkinsons_range = 4.0 <= frequency <= 6.5
+    in_essential_range  = 6.0 < frequency <= 15.0   # broader — includes action tremor
+    is_high_freq_noise  = frequency > 15.0 and symmetry > 0.75 and confidence < 0.2
+
+    if is_high_freq_noise:
+        return "none", 0
+
+    # Scale FTM thresholds: tighten for non-tremor-frequency signals
+    # so a fast, symmetric jitter doesn't land in "moderate".
+    if in_parkinsons_range or in_essential_range:
+        thresholds = [(0.3, "none", 0), (2.0, "mild", 1),
+                      (5.0, "moderate", 2), (12.0, "marked", 3)]
+    else:
+        # Intentional / unclassified — require larger amplitude to flag
+        thresholds = [(1.0, "none", 0), (6.0, "mild", 1),
+                      (12.0, "moderate", 2), (20.0, "marked", 3)]
+
+    for threshold, label, grade in reversed(thresholds):
+        if amplitude_mm >= threshold:
+            return label, grade
+
+    return "none", 0
+
+
     if value is None:
         return np.empty((0, 21, 3), dtype=np.float64)
     landmarks = np.asarray(value, dtype=np.float64)
@@ -352,7 +458,23 @@ def analyze_tremor(hand_data: dict) -> TremorFeatures:
             notes="No hand landmarks were captured.",
         )
 
-    # Use the more prominent hand as the primary signal
+    metadata = hand_data.get("metadata", {})
+    units = metadata.get("units", "mm") if isinstance(metadata, dict) else "mm"
+
+    # ── Unit calibration ──────────────────────────────────────────────────────
+    # When there's no depth camera the pipeline stores normalized MediaPipe
+    # coords (0-1 range).  Convert to mm using hand anatomy as a ruler so
+    # the FTM amplitude thresholds mean something real.
+    right_scale = left_scale = 1.0
+    if units not in ("mm", "mock"):
+        if has_right:
+            right_scale = _estimate_mm_per_unit(right_hand)
+        if has_left:
+            left_scale  = _estimate_mm_per_unit(left_hand)
+
+    right_amp = right_amp * right_scale
+    left_amp  = left_amp  * left_scale
+
     if has_right and (right_amp >= left_amp or not has_left):
         dominant_freq = right_freq
         dominant_amp  = right_amp
@@ -366,14 +488,12 @@ def analyze_tremor(hand_data: dict) -> TremorFeatures:
     symmetry     = compute_symmetry_score(right_freq, left_freq, right_amp, left_amp) if has_right and has_left else 0.0
     tremor_type  = classify_tremor_type(dominant_freq, dominant_amp)
     risk, notes  = assess_risk_level(dominant_freq, dominant_amp, symmetry, tremor_type)
-    metadata = hand_data.get("metadata", {})
     if not has_right or not has_left:
         captured = "right" if has_right else "left"
         notes = f"{notes} Only the {captured} hand was captured; symmetry could not be assessed."
-    if isinstance(metadata, dict) and metadata.get("units") not in (None, "mm", "mock"):
+    if units not in (None, "mm", "mock"):
         notes = (
-            f"{notes} Camera capture did not include calibrated depth; "
-            "amplitudes are image-space estimates."
+            f"{notes} No depth camera — amplitudes estimated from hand-size calibration."
         )
 
     return TremorFeatures(
@@ -450,60 +570,116 @@ MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 
 # ─────────────────────────────────────────────
-# Nemotron severity classifier
+# Nemotron handoff — explanation only
 #
-# Sends amplitude to Nemotron 120B and gets back
-# FTM severity classification in caps for the UI.
+# Severity classification is now done locally by classify_severity_local()
+# so a Nemotron API failure can never produce a wrong severity grade.
+# Nemotron's job is writing the plain-English patient explanation.
 # ─────────────────────────────────────────────
-def classify_with_nemotron(amplitude_mm: float) -> dict:
+def classify_with_nemotron(features: "TremorFeatures | float") -> dict:
+    """
+    Accepts either a full TremorFeatures dataclass or a bare amplitude_mm
+    float (kept for backwards compatibility).
+
+    Returns dict with keys:
+        severity, ftm_score, risk_level, interpretation, recommendation,
+        latency_s, confidence, asymmetry_flag, clinical_note
+    """
+    # ── 1. Local deterministic classification (never fails) ─────────────────
+    if isinstance(features, (int, float)):
+        # Legacy call with bare amplitude — reconstruct minimal features
+        amplitude_mm = float(features)
+        frequency    = 0.0
+        tremor_type  = "unknown"
+        symmetry     = 1.0
+        confidence   = 0.5
+        risk_level   = "unknown"
+    else:
+        amplitude_mm = features.amplitude_mm
+        frequency    = features.dominant_frequency_hz
+        tremor_type  = features.tremor_type
+        symmetry     = features.symmetry_score
+        confidence   = features.confidence
+        risk_level   = features.risk_level
+
+    severity, ftm_score = classify_severity_local(
+        frequency, amplitude_mm, tremor_type, symmetry, confidence
+    )
+
+    base_result = {
+        "severity":      severity,
+        "ftm_score":     ftm_score,
+        "risk_level":    risk_level,
+        "asymmetry_flag": symmetry < 0.6,
+        "confidence":    int(confidence * 100),
+    }
+
+    # ── 2. Nemotron for plain-English explanation (optional, non-blocking) ───
     t0 = time.time()
     try:
         if client is None:
-            raise RuntimeError("OpenAI SDK is not installed.")
+            raise RuntimeError("OpenAI SDK not installed")
+
+        # Compact prompt — Nemotron is a chain-of-thought model so we tell it
+        # explicitly to skip reasoning and output JSON immediately.
+        prompt = (
+            f"Tremor data: frequency={frequency:.1f}Hz, amplitude={amplitude_mm:.1f}mm, "
+            f"type={tremor_type}, symmetry={symmetry:.2f}, severity={severity} (FTM {ftm_score}), "
+            f"risk={risk_level}.\n\n"
+            "Clinical refs: Parkinson's = 4-6Hz resting, asymmetric. "
+            "Essential = 6-12Hz, symmetric. Physiological < 1mm.\n\n"
+            "Output ONLY valid JSON, no thinking, no preamble:\n"
+            '{"interpretation":"2-3 plain-English sentences for patient",'
+            '"recommendation":"one specific next step",'
+            '"clinical_note":"one sentence clinical summary"}'
+        )
+
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": """You are a clinical AI. Classify tremor severity by amplitude using the FTM scale.
-
-FTM Severity Scale:
-  none     = < 0.1 mm
-  mild     = 0.1-5 mm    (FTM grade 1)
-  moderate = 5-10 mm     (FTM grade 2)
-  marked   = 10-20 mm    (FTM grade 3)
-  severe   = > 20 mm     (FTM grade 4)
-
-Respond with ONLY this JSON, no thinking, no explanation:
-{"severity": "none|mild|moderate|marked|severe", "ftm_score": 0}"""
-                },
-                {
-                    "role": "user",
-                    "content": f"Amplitude: {amplitude_mm} mm. Output JSON only, start with {{"
-                },
+                {"role": "system", "content":
+                    "You are a neurological screening assistant. "
+                    "Output ONLY valid compact JSON. No thinking. No markdown. "
+                    "Start your response with { immediately."},
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=2000,
+            max_tokens=400,
             temperature=0.0,
         )
 
         latency = round(time.time() - t0, 2)
-        content = response.choices[0].message.content
-        if not content:
-            raise ValueError("Empty response")
+        raw = (response.choices[0].message.content or "").strip()
 
-        raw   = content.strip()
-        start = raw.find('{')
+        # Nemotron reasoning models often prefix with chain-of-thought.
+        # Find the LAST complete JSON object in the output.
+        start = raw.rfind('{')
         end   = raw.rfind('}')
-        if start == -1 or end == -1:
-            raise ValueError(f"No JSON found: {raw}")
-
-        result = json.loads(raw[start:end+1])
-        result["latency_s"] = latency
-        return result
+        if start != -1 and end > start:
+            explanation = json.loads(raw[start:end + 1])
+            base_result.update({
+                "interpretation":  explanation.get("interpretation", ""),
+                "recommendation":  explanation.get("recommendation", "Consult a neurologist."),
+                "clinical_note":   explanation.get("clinical_note", ""),
+                "latency_s":       latency,
+            })
+        else:
+            raise ValueError(f"No JSON found in: {raw[:200]}")
 
     except Exception as e:
-        return {"severity": "error", "ftm_score": -1,
-                "latency_s": round(time.time()-t0, 2), "error": str(e)}
+        latency = round(time.time() - t0, 2)
+        # API failed — severity is already set correctly, just fill explanation defaults.
+        base_result.update({
+            "interpretation":  (
+                f"Your tremor reading shows {severity} activity at {frequency:.1f} Hz "
+                f"with {amplitude_mm:.1f} mm amplitude."
+            ),
+            "recommendation":  "Please consult a neurologist for formal evaluation.",
+            "clinical_note":   f"API explanation unavailable: {e}",
+            "latency_s":       latency,
+        })
+
+    return base_result
+
 
 
 

@@ -56,8 +56,8 @@ CAMERA_SOURCES = [
 
 HAND_OPTIONS = [
     {"id": "both",  "label": "Both hands"},
-    {"id": "right", "label": "Right hand only"},
-    {"id": "left",  "label": "Left hand only"},
+    {"id": "right", "label": "Left hand only"}, #These are reversed because it's from the camera's perspective which mirrors left and right
+    {"id": "left",  "label": "Right hand only"},
     {"id": "auto",  "label": "Most confident hand"},
 ]
 
@@ -403,7 +403,7 @@ def main() -> None:
 
         with st.spinner("Analyzing tremor data..."):
             features    = analyze_tremor(hand_data)
-            result      = classify_with_nemotron(features.amplitude_mm)
+            result      = classify_with_nemotron(features)
             severity    = result.get("severity", "unknown")
             ftm         = result.get("ftm_score", "?")
             explanation = get_explanation(features, severity, ftm)
@@ -428,18 +428,12 @@ def main() -> None:
         st.markdown(
             f"<div style='background:white;border:1px solid #e2e8f0;"
             f"border-left:5px solid {color};border-radius:8px;"
-            f"padding:28px 32px;margin-bottom:24px;"
-            f"display:flex;align-items:center;justify-content:space-between;'>"
-            f"<div>"
+            f"padding:28px 32px;margin-bottom:24px;'>"
             f"<p style='color:#64748b;font-size:11px;font-weight:600;letter-spacing:0.1em;"
             f"text-transform:uppercase;margin:0 0 6px 0;'>Assessment Result</p>"
             f"<p style='color:{color};font-size:36px;font-weight:700;margin:0;'>{severity.upper()}</p>"
             f"<p style='color:#94a3b8;font-size:13px;margin:4px 0 0 0;'>Fahn-Tolosa-Marin Grade {ftm} / 4</p>"
-            f"</div>"
-            f"<div style='background:{bg};border:1px solid {color}22;border-radius:8px;padding:16px 24px;text-align:center;'>"
-            f"<p style='color:#64748b;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 4px 0;'>AI Confidence</p>"
-            f"<p style='color:{color};font-size:28px;font-weight:700;margin:0;'>{result.get('confidence', '--')}%</p>"
-            f"</div></div>",
+            f"</div>",
             unsafe_allow_html=True,
         )
 
