@@ -389,7 +389,7 @@ def main() -> None:
         border-radius: 50%;
         border: 3px solid #dbeafe;
         border-top-color: #2563eb;
-        animation: Early Parkinson's Screening-spin 0.85s linear infinite;
+        animation: eps-spin 0.85s linear infinite;
     }
     .report-status-title {
         color: #1e3a5f;
@@ -457,7 +457,7 @@ def main() -> None:
         border-radius: 50%;
         border: 6px solid #dbeafe;
         border-top-color: #2563eb;
-        animation: Early Parkinson's Screening-spin 0.85s linear infinite;
+        animation: eps-spin 0.85s linear infinite;
         margin-bottom: 24px;
     }
     .processing-kicker {
@@ -493,14 +493,14 @@ def main() -> None:
         border-radius: 50%;
         background: #2563eb;
         opacity: 0.35;
-        animation: Early Parkinson's Screening-pulse 1.2s ease-in-out infinite;
+        animation: eps-pulse 1.2s ease-in-out infinite;
     }
     .processing-steps span:nth-child(2) { animation-delay: 0.16s; }
     .processing-steps span:nth-child(3) { animation-delay: 0.32s; }
-    @keyframes Early Parkinson's Screening-spin {
+    @keyframes eps-spin {
         to { transform: rotate(360deg); }
     }
-    @keyframes Early Parkinson's Screening-pulse {
+    @keyframes eps-pulse {
         0%, 100% { opacity: 0.25; transform: scale(0.85); }
         50% { opacity: 1; transform: scale(1); }
     }
