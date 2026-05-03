@@ -624,7 +624,7 @@ def main() -> None:
         progress_slot.empty()
         preview_slot.empty()
         status_slot.success(
-            f"Captured {right_n} right-hand and {left_n} left-hand samples "
+            f"Captured {right_n} left-hand and {left_n} right-hand samples "
             f"at ~{hand_data.get('sample_rate', 0):.1f} Hz "
             f"(units: {meta.get('units', 'unknown')})."
         )
