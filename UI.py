@@ -81,7 +81,7 @@ def get_explanation(features, severity: str, ftm: int) -> str:
                     )
                 }
             ],
-            max_tokens=150,
+            max_tokens=1000,
             temperature=0.0,
         )
         content = response.choices[0].message.content
@@ -180,6 +180,24 @@ def run_capture(
     return final_hand_data
 
 
+def render_processing_screen(slot, stage: str, detail: str) -> None:
+    """Render the post-recording processing state in a stable placeholder."""
+    slot.markdown(
+        f"""
+        <div class="processing-screen" role="status" aria-live="polite">
+            <div class="processing-spinner"></div>
+            <p class="processing-kicker">Recording complete</p>
+            <p class="processing-title">{stage}</p>
+            <p class="processing-detail">{detail}</p>
+            <div class="processing-steps" aria-hidden="true">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="SENTINEL -- Tremor Screening",
@@ -276,6 +294,74 @@ def main() -> None:
         border-radius: 8px;
         border: 1px solid #e2e8f0;
         background: #0f172a;
+    }
+
+    .processing-screen {
+        min-height: 360px;
+        background: #ffffff;
+        border: 1px solid #dbe4ee;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 56px 40px;
+        margin: 24px 0;
+        text-align: center;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .processing-spinner {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        border: 6px solid #dbeafe;
+        border-top-color: #2563eb;
+        animation: sentinel-spin 0.85s linear infinite;
+        margin-bottom: 24px;
+    }
+    .processing-kicker {
+        color: #64748b;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        margin: 0 0 8px 0;
+        text-transform: uppercase;
+    }
+    .processing-title {
+        color: #1e3a5f;
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.25;
+        margin: 0 0 10px 0;
+    }
+    .processing-detail {
+        color: #64748b;
+        font-size: 14px;
+        line-height: 1.7;
+        max-width: 560px;
+        margin: 0;
+    }
+    .processing-steps {
+        display: flex;
+        gap: 8px;
+        margin-top: 24px;
+    }
+    .processing-steps span {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2563eb;
+        opacity: 0.35;
+        animation: sentinel-pulse 1.2s ease-in-out infinite;
+    }
+    .processing-steps span:nth-child(2) { animation-delay: 0.16s; }
+    .processing-steps span:nth-child(3) { animation-delay: 0.32s; }
+    @keyframes sentinel-spin {
+        to { transform: rotate(360deg); }
+    }
+    @keyframes sentinel-pulse {
+        0%, 100% { opacity: 0.25; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1); }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -401,12 +487,30 @@ def main() -> None:
             f"(units: {meta.get('units', 'unknown')})."
         )
 
-        with st.spinner("Analyzing tremor data..."):
-            features    = analyze_tremor(hand_data)
-            result      = classify_with_nemotron(features)
-            severity    = result.get("severity", "unknown")
-            ftm         = result.get("ftm_score", "?")
-            explanation = get_explanation(features, severity, ftm)
+        processing_slot = st.empty()
+        render_processing_screen(
+            processing_slot,
+            "Analyzing movement signal",
+            "SENTINEL is extracting tremor amplitude, frequency, symmetry, and signal quality from the captured video.",
+        )
+        features = analyze_tremor(hand_data)
+
+        render_processing_screen(
+            processing_slot,
+            "Nemotron is reviewing the assessment",
+            "The clinical model is interpreting the movement profile and preparing the screening result.",
+        )
+        result   = classify_with_nemotron(features)
+        severity = result.get("severity", "unknown")
+        ftm      = result.get("ftm_score", "?")
+
+        render_processing_screen(
+            processing_slot,
+            "Preparing patient summary",
+            "Nemotron is turning the assessment into plain-language guidance for the results panel.",
+        )
+        explanation = get_explanation(features, severity, ftm)
+        processing_slot.empty()
 
         st.session_state.last_features    = features
         st.session_state.last_severity    = severity
