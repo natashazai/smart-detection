@@ -261,8 +261,12 @@ class OpenCvFrameSource:
     def __init__(self, camera_index: int = 0, fps: int = 30) -> None:
         load_runtime_dependencies()
         self.capture = cv2.VideoCapture(camera_index)
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # 640x480 is the native resolution most laptop webcams hit at full FPS.
+        # 1280x720 forces many cameras down to 15fps, and larger frames make
+        # MediaPipe significantly slower — hand detection accuracy doesn't
+        # meaningfully improve above 640x480 for tremor analysis.
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.capture.set(cv2.CAP_PROP_FPS, fps)
 
     def is_opened(self) -> bool:
@@ -382,17 +386,19 @@ class SolutionsHandsDetector:
         max_num_hands: int,
         min_detection_confidence: float,
         min_tracking_confidence: float,
+        model_complexity: int = 0,
     ) -> None:
         self.max_num_hands = max_num_hands
         self.min_detection_confidence = min_detection_confidence
         self.min_tracking_confidence = min_tracking_confidence
+        self.model_complexity = model_complexity
         self._hands = None
 
     def __enter__(self):
         self._hands = mp.solutions.hands.Hands(
             static_image_mode=False,
             max_num_hands=self.max_num_hands,
-            model_complexity=1,
+            model_complexity=self.model_complexity,
             min_detection_confidence=self.min_detection_confidence,
             min_tracking_confidence=self.min_tracking_confidence,
         )
@@ -483,12 +489,14 @@ def create_hand_detector(
     min_detection_confidence: float,
     min_tracking_confidence: float,
     model_path: str | Path | None = None,
+    model_complexity: int = 0,
 ) -> SolutionsHandsDetector | TasksHandDetector:
     if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
         return SolutionsHandsDetector(
             max_num_hands=max_num_hands,
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
+            model_complexity=model_complexity,
         )
     return TasksHandDetector(
         max_num_hands=max_num_hands,
@@ -636,7 +644,9 @@ def hand_landmarks_to_xyz(
         pixel_y = float(landmark.y) * height
         depth_mm = depths[idx] if depths[idx] is not None else default_depth
         if depth_mm is None:
-            output[idx] = (pixel_x, pixel_y, float(landmark.z) * width)
+            # Store normalized coords (0-1) so downstream amplitude is in a
+            # consistent unit. analyze_tremor converts to mm via hand-size calibration.
+            output[idx] = (float(landmark.x), float(landmark.y), float(landmark.z))
             continue
         if depths[idx] is not None:
             depth_hits += 1
@@ -688,8 +698,8 @@ def capture_hand_data_streaming(
     fps: int = 30,
     mirror: bool | None = None,
     hand_landmarker_model: str | Path | None = None,
-    min_detection_confidence: float = 0.7,
-    min_tracking_confidence: float = 0.7,
+    min_detection_confidence: float | None = None,
+    min_tracking_confidence: float = 0.5,
     draw_overlay: bool = True,
 ) -> Iterator[tuple[np.ndarray, float, dict[str, Any] | None]]:
     """Streaming version of capture_hand_data.
@@ -703,7 +713,13 @@ def capture_hand_data_streaming(
     load_runtime_dependencies()
     if hand not in {"auto", "left", "right", "both"}:
         raise ValueError("hand must be one of: auto, left, right, both")
- 
+
+    # Laptop webcams are lower quality than OAK-D; 0.7 is too strict and causes
+    # frequent detection drops which starve the FFT of frames. 0.5 keeps most
+    # real hands while still rejecting background false positives.
+    if min_detection_confidence is None:
+        min_detection_confidence = 0.5 if source == "webcam" else 0.7
+
     frame_source = open_frame_source(source, camera_index=camera_index, fps=fps)
     if not frame_source.is_opened():
         raise RuntimeError(f"Could not open camera source: {source}")
@@ -722,6 +738,9 @@ def capture_hand_data_streaming(
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
             model_path=hand_landmarker_model,
+            # OAK-D streams high-quality frames where the heavier model pays off.
+            # Webcam runs model_complexity=0 (lightweight) to keep frame rate smooth.
+            model_complexity=0 if source == "webcam" else 1,
         ) as hands:
             while True:
                 elapsed = time.perf_counter() - start
@@ -862,6 +881,7 @@ def capture_hand_data(
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
             model_path=hand_landmarker_model,
+            model_complexity=0 if source == "webcam" else 1,
         ) as hands:
             while (time.perf_counter() - start) < duration_seconds:
                 ok, camera_frame = frame_source.read()
