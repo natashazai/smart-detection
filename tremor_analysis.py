@@ -47,66 +47,6 @@ class TremorFeatures:
 
 
 # ─────────────────────────────────────────────
-# MOCK DATA GENERATOR
-# Replace with Person 1's real OAK-D stream
-# ─────────────────────────────────────────────
-
-def generate_mock_hand_data(
-    duration_seconds: int = 30,
-    sample_rate: int = 30,
-    tremor_frequency: float = 5.0,
-    tremor_amplitude: float = 3.5,
-    noise_level: float = 0.5,
-    seed: int = 42
-) -> dict:
-    """
-    Simulates 30 seconds of hand landmark XYZ data at 30fps.
-
-    Returns dict with shape:
-    {
-        "right": np.array of shape (N, 21, 3),  # 21 landmarks, XYZ
-        "left":  np.array of shape (N, 21, 3),
-        "timestamps": np.array of shape (N,)
-    }
-
-    When Person 1 is ready, swap this function out for the real feed.
-    Landmark index 8 = index fingertip (most useful for tremor tracking).
-    """
-    np.random.seed(seed)
-    N = duration_seconds * sample_rate
-    t = np.linspace(0, duration_seconds, N)
-
-    def make_hand(freq, amp, noise):
-        landmarks = np.zeros((N, 21, 3))
-        for i in range(21):
-            # Tremor signal on all axes, stronger on fingertips (index 4–20)
-            scale = 1.0 if i < 4 else 1.5
-            landmarks[:, i, 0] = amp * scale * np.sin(2 * np.pi * freq * t) + noise * np.random.randn(N)
-            landmarks[:, i, 1] = amp * scale * np.sin(2 * np.pi * freq * t + 0.3) + noise * np.random.randn(N)
-            landmarks[:, i, 2] = amp * scale * np.sin(2 * np.pi * freq * t + 0.6) + noise * np.random.randn(N)
-        return landmarks
-
-    right_hand = make_hand(tremor_frequency, tremor_amplitude, noise_level)
-
-    # Parkinson's is typically asymmetric — left hand slightly different
-    left_hand = make_hand(
-        freq=tremor_frequency * 0.85,
-        amp=tremor_amplitude * 0.4,   # weaker on non-dominant side
-        noise=noise_level
-    )
-
-    return {
-        "right": right_hand,
-        "left": left_hand,
-        "timestamps": t,
-        "right_timestamps": t,
-        "left_timestamps": t,
-        "sample_rate": sample_rate,
-        "metadata": {"source": "mock", "units": "mm"},
-    }
-
-
-# ─────────────────────────────────────────────
 # CORE ANALYSIS FUNCTIONS
 # ─────────────────────────────────────────────
 
@@ -150,6 +90,12 @@ def _bandpass_fft(
 
 def compute_dominant_frequency(signal_xyz: np.ndarray, sample_rate: float) -> tuple[float, float]:
     """
+    Runs FFT on each XYZ axis separately and averages the power spectra.
+
+    Using np.linalg.norm(XYZ) before FFT doubles frequencies because
+    ||sin(2πft)||² ∝ (1 − cos(4πft)), so 5 Hz would appear as 10 Hz.
+    Per-axis FFT with averaged spectra avoids this.
+
     Runs FFT on each XYZ axis separately and averages the power spectra.
 
     Using np.linalg.norm(XYZ) before FFT doubles frequencies because

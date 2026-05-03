@@ -55,7 +55,6 @@ HAND_CONNECTIONS = (
 DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES = (
     Path("hand_landmarker.task"),
     Path("models/hand_landmarker.task"),
-    Path.home() / "Dev/HackathonParkinsonsDetection/models/hand_landmarker.task",
 )
 
 
@@ -644,6 +643,9 @@ def hand_landmarks_to_xyz(
         pixel_y = float(landmark.y) * height
         depth_mm = depths[idx] if depths[idx] is not None else default_depth
         if depth_mm is None:
+            # Store normalized coords (0-1) so downstream amplitude is in a
+            # consistent unit. analyze_tremor converts to mm via hand-size calibration.
+            output[idx] = (float(landmark.x), float(landmark.y), float(landmark.z))
             # Store normalized coords (0-1) so downstream amplitude is in a
             # consistent unit. analyze_tremor converts to mm via hand-size calibration.
             output[idx] = (float(landmark.x), float(landmark.y), float(landmark.z))
