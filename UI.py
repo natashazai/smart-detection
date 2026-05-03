@@ -56,8 +56,8 @@ CAMERA_SOURCES = [
 
 HAND_OPTIONS = [
     {"id": "both",  "label": "Both hands"},
-    {"id": "right", "label": "Right hand only"},
-    {"id": "left",  "label": "Left hand only"},
+    {"id": "right", "label": "Left hand only"}, #These are reversed because it's from the camera's perspective which mirrors left and right
+    {"id": "left",  "label": "Right hand only"},
     {"id": "auto",  "label": "Most confident hand"},
 ]
 
