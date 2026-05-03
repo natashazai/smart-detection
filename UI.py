@@ -7,15 +7,16 @@ Run with:
 from __future__ import annotations
 
 import os
+import time
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from tremor_analysis import (
-    generate_mock_hand_data,
     analyze_tremor,
     classify_with_nemotron,
 )
+from pipeline import capture_hand_data_streaming
 from report_generator import generate_report
 
 load_dotenv()
@@ -46,11 +47,18 @@ SEVERITY_BG = {
     "error":    "#f9fafb",
 }
 
-SCENARIOS = [
-    {"name": "Healthy baseline",      "frequency": 10.0, "amplitude": 0.05, "noise": 0.3},
-    {"name": "Mild essential tremor", "frequency":  7.0, "amplitude": 2.0,  "noise": 0.5},
-    {"name": "Moderate Parkinson's",  "frequency":  5.2, "amplitude": 4.0,  "noise": 0.5},
-    {"name": "Severe tremor",         "frequency":  4.5, "amplitude": 15.0, "noise": 1.0},
+# Capture options offered in the sidebar. Order matters: OAK is the default.
+CAMERA_SOURCES = [
+    {"id": "oak",     "label": "OAK-D Lite (RGB + depth)"},
+    {"id": "oak-rgb", "label": "OAK-D Lite (RGB only)"},
+    {"id": "webcam",  "label": "Webcam"},
+]
+
+HAND_OPTIONS = [
+    {"id": "both",  "label": "Both hands"},
+    {"id": "right", "label": "Right hand only"},
+    {"id": "left",  "label": "Left hand only"},
+    {"id": "auto",  "label": "Most confident hand"},
 ]
 
 
@@ -85,6 +93,93 @@ def get_explanation(features, severity: str, ftm: int) -> str:
         return f"Could not generate explanation: {e}"
 
 
+# Preview rendering knobs. These do NOT affect capture FPS or sample quality —
+# capture still runs as fast as the camera+MediaPipe loop allows; we just throttle
+# how often the browser is asked to repaint.
+PREVIEW_FPS         = 10           # max preview repaints per second
+PROGRESS_UPDATE_HZ  = 4            # max progress-bar updates per second
+PREVIEW_MAX_WIDTH   = 640          # downscale frames wider than this before sending
+PREVIEW_JPEG_QUALITY = 70          # JPEG quality for the preview stream
+
+
+def run_capture(
+    *,
+    source: str,
+    hand: str,
+    duration: float,
+    fps: int,
+    preview_slot,
+    progress_slot,
+    status_slot,
+    sample_count_slot,
+) -> dict | None:
+    """Drive the streaming capture generator and update UI placeholders.
+
+    Capture runs at full speed inside the generator. UI repaints are throttled
+    so Streamlit's websocket isn't flooded with full-resolution frames.
+
+    Returns the final hand_data dict, or None on failure.
+    """
+    import cv2
+
+    final_hand_data: dict | None = None
+    try:
+        gen = capture_hand_data_streaming(
+            duration_seconds=duration,
+            source=source,
+            hand=hand,
+            fps=fps,
+        )
+    except Exception as exc:
+        status_slot.error(f"Could not start camera: {exc}")
+        return None
+
+    preview_interval  = 1.0 / PREVIEW_FPS
+    progress_interval = 1.0 / PROGRESS_UPDATE_HZ
+    last_preview_t    = 0.0
+    last_progress_t   = 0.0
+    jpeg_params       = [int(cv2.IMWRITE_JPEG_QUALITY), PREVIEW_JPEG_QUALITY]
+
+    try:
+        for preview_frame, elapsed, maybe_final in gen:
+            if maybe_final is not None:
+                final_hand_data = maybe_final
+                break
+
+            now = time.perf_counter()
+
+            # Throttled preview repaint. Downscale, then JPEG-encode so we ship
+            # ~50 KB per frame over the websocket instead of ~900 KB raw.
+            if (now - last_preview_t) >= preview_interval:
+                small = preview_frame
+                h, w = small.shape[:2]
+                if w > PREVIEW_MAX_WIDTH:
+                    scale = PREVIEW_MAX_WIDTH / w
+                    small = cv2.resize(
+                        small,
+                        (PREVIEW_MAX_WIDTH, int(h * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                ok, buf = cv2.imencode(".jpg", small, jpeg_params)
+                if ok:
+                    preview_slot.image(buf.tobytes(), width="stretch")
+                last_preview_t = now
+
+            # Throttled progress repaint.
+            if (now - last_progress_t) >= progress_interval:
+                pct = min(elapsed / duration, 1.0)
+                progress_slot.progress(
+                    pct,
+                    text=f"Recording... {elapsed:0.1f}s / {duration:0.0f}s",
+                )
+                last_progress_t = now
+    except Exception as exc:
+        status_slot.error(f"Capture failed: {exc}")
+        return None
+
+    return final_hand_data
+
+
 def main() -> None:
     st.set_page_config(
         page_title="SENTINEL -- Tremor Screening",
@@ -108,7 +203,9 @@ def main() -> None:
     [data-testid="stSidebar"] > div:first-child { padding-top: 0 !important; }
     [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
     [data-testid="stSidebar"] [data-testid="stSelectbox"] * { color: #374151 !important; }
+    [data-testid="stSidebar"] [data-testid="stSlider"] * { color: #ffffff !important; }
     [data-testid="stSidebar"] .stSelectbox label,
+    [data-testid="stSidebar"] .stSlider label,
     [data-testid="stSidebar"] .stButton,
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 { color: #ffffff !important; }
@@ -173,6 +270,13 @@ def main() -> None:
     [data-testid="stMainBlockContainer"] {
         padding-top: 0 !important;
     }
+
+    /* Camera preview frame */
+    .preview-frame img {
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        background: #0f172a;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -214,35 +318,90 @@ def main() -> None:
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("**Select Test Scenario**")
-        scenario_name = st.selectbox(
-            "Tremor profile",
-            [s["name"] for s in SCENARIOS],
+        st.markdown("**Camera Source**")
+        source_label = st.selectbox(
+            "Camera source",
+            [s["label"] for s in CAMERA_SOURCES],
             label_visibility="collapsed",
         )
-        scenario = next(s for s in SCENARIOS if s["name"] == scenario_name)
+        source_id = next(s["id"] for s in CAMERA_SOURCES if s["label"] == source_label)
+
+        st.markdown("**Hand Selection**")
+        hand_label = st.selectbox(
+            "Hand selection",
+            [h["label"] for h in HAND_OPTIONS],
+            label_visibility="collapsed",
+        )
+        hand_id = next(h["id"] for h in HAND_OPTIONS if h["label"] == hand_label)
+
+        st.markdown("**Recording Duration**")
+        duration = st.slider(
+            "Duration (seconds)",
+            min_value=10, max_value=60, value=30, step=5,
+            label_visibility="collapsed",
+        )
+        st.markdown(f"<p style='margin-top:-8px;'>{duration} seconds</p>", unsafe_allow_html=True)
 
         st.markdown("<br/>", unsafe_allow_html=True)
-        st.markdown("**Signal Parameters**")
-        st.markdown(f"Frequency: **{scenario['frequency']} Hz**")
-        st.markdown(f"Amplitude: **{scenario['amplitude']} mm**")
-        st.markdown(f"Noise level: **{scenario['noise']}**")
+        st.markdown(
+            "<p style='font-size:12px;line-height:1.5;'>"
+            "Hold the affected hand outstretched and steady within the camera's view. "
+            "Recording begins immediately.</p>",
+            unsafe_allow_html=True,
+        )
+
         st.markdown("<br/>", unsafe_allow_html=True)
-        run = st.button("Run Analysis", type="primary", use_container_width=True)
+        run = st.button("Start Recording", type="primary", use_container_width=True)
 
     # Session state
-    for key in ["last_features", "last_severity", "last_ftm", "last_explanation", "last_result"]:
+    for key in ["last_features", "last_severity", "last_ftm",
+                "last_explanation", "last_result", "last_metadata"]:
         if key not in st.session_state:
             st.session_state[key] = None
 
+    # Live capture flow
     if run:
-        with st.spinner("Analyzing tremor data..."):
-            hand_data = generate_mock_hand_data(
-                duration_seconds=30, sample_rate=30,
-                tremor_frequency=scenario["frequency"],
-                tremor_amplitude=scenario["amplitude"],
-                noise_level=scenario["noise"],
+        st.markdown("#### Live Capture")
+        preview_container = st.container()
+        with preview_container:
+            preview_slot = st.empty()
+            progress_slot = st.empty()
+            sample_count_slot = st.empty()
+        status_slot = st.empty()
+
+        hand_data = run_capture(
+            source=source_id,
+            hand=hand_id,
+            duration=float(duration),
+            fps=30,
+            preview_slot=preview_slot,
+            progress_slot=progress_slot,
+            status_slot=status_slot,
+            sample_count_slot=sample_count_slot,
+        )
+
+        if hand_data is None:
+            st.stop()
+
+        meta = hand_data.get("metadata", {})
+        right_n = meta.get("right_samples", 0)
+        left_n = meta.get("left_samples", 0)
+        if right_n + left_n == 0:
+            status_slot.error(
+                "No hand was detected during recording. Make sure your hand is visible "
+                "to the camera and try again."
             )
+            st.stop()
+
+        progress_slot.empty()
+        preview_slot.empty()
+        status_slot.success(
+            f"Captured {right_n} right-hand and {left_n} left-hand samples "
+            f"at ~{hand_data.get('sample_rate', 0):.1f} Hz "
+            f"(units: {meta.get('units', 'unknown')})."
+        )
+
+        with st.spinner("Analyzing tremor data..."):
             features    = analyze_tremor(hand_data)
             result      = classify_with_nemotron(features.amplitude_mm)
             severity    = result.get("severity", "unknown")
@@ -254,7 +413,9 @@ def main() -> None:
         st.session_state.last_ftm         = ftm
         st.session_state.last_explanation = explanation
         st.session_state.last_result      = result
+        st.session_state.last_metadata    = meta
 
+    # Results panel
     if st.session_state.last_features:
         features    = st.session_state.last_features
         severity    = st.session_state.last_severity
@@ -323,14 +484,14 @@ def main() -> None:
                     use_container_width=True,
                 )
 
-    else:
+    elif not run:
         st.markdown(
             "<div style='background:white;border:1px solid #e2e8f0;border-radius:8px;"
             "padding:80px 40px;text-align:center;margin-top:40px;'>"
             "<p style='font-size:32px;margin:0 0 12px 0;'>🩺</p>"
             "<p style='color:#1e3a5f;font-size:18px;font-weight:600;margin:0 0 8px 0;'>Ready for Assessment</p>"
             "<p style='color:#94a3b8;font-size:14px;margin:0;'>"
-            "Select a scenario from the sidebar and click Run Analysis to begin.</p></div>",
+            "Select a camera source from the sidebar and click Start Recording to begin.</p></div>",
             unsafe_allow_html=True,
         )
 

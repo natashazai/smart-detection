@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import Iterator
 
 import numpy as np
 
@@ -39,6 +40,17 @@ LANDMARK_INDEXES = {
     "middle_mcp": 9,
     "pinky_mcp": 17,
 }
+
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),           # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),           # index
+    (5, 9), (9, 10), (10, 11), (11, 12),      # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),    # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),   # pinky
+    (0, 17),                                  # palm
+)
+ 
+
 
 DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES = (
     Path("hand_landmarker.task"),
@@ -635,6 +647,165 @@ def hand_landmarks_to_xyz(
 
     quality = float(np.clip(0.5 + 0.5 * (depth_hits / max(len(landmarks), 1)), 0.0, 1.0))
     return output, quality, "mm"
+
+def draw_hand_overlay(
+    frame: np.ndarray,
+    selected_hands: list[tuple[str, Any]],
+    *,
+    color_right: tuple[int, int, int] = (37, 99, 235),   # blue
+    color_left: tuple[int, int, int] = (217, 119, 6),    # amber
+) -> np.ndarray:
+    """Draw landmark points and skeleton edges on a BGR frame in place.
+ 
+    Returns the same frame for convenience.
+    """
+    height, width = frame.shape[:2]
+    for label, hand_landmarks in selected_hands:
+        landmarks = (
+            hand_landmarks.landmark
+            if hasattr(hand_landmarks, "landmark")
+            else hand_landmarks
+        )
+        color = color_right if label == "right" else color_left
+        points = [
+            (int(lm.x * width), int(lm.y * height)) for lm in landmarks
+        ]
+        for a, b in HAND_CONNECTIONS:
+            if a < len(points) and b < len(points):
+                cv2.line(frame, points[a], points[b], color, 2, cv2.LINE_AA)
+        for px, py in points:
+            cv2.circle(frame, (px, py), 4, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, (px, py), 5, (255, 255, 255), 1, cv2.LINE_AA)
+    return frame
+
+
+def capture_hand_data_streaming(
+    *,
+    duration_seconds: float = 30.0,
+    source: str = "oak",
+    hand: str = "both",
+    camera_index: int = 0,
+    fps: int = 30,
+    mirror: bool | None = None,
+    hand_landmarker_model: str | Path | None = None,
+    min_detection_confidence: float = 0.7,
+    min_tracking_confidence: float = 0.7,
+    draw_overlay: bool = True,
+) -> Iterator[tuple[np.ndarray, float, dict[str, Any] | None]]:
+    """Streaming version of capture_hand_data.
+ 
+    Yields (preview_frame_bgr, elapsed_seconds, final_hand_data_or_None) on
+    every iteration. ``final_hand_data_or_None`` is None for every frame
+    except the last, where it carries the same dict shape as
+    ``capture_hand_data``'s return value. The caller can stop early by
+    closing the generator (``gen.close()``).
+    """
+    load_runtime_dependencies()
+    if hand not in {"auto", "left", "right", "both"}:
+        raise ValueError("hand must be one of: auto, left, right, both")
+ 
+    frame_source = open_frame_source(source, camera_index=camera_index, fps=fps)
+    if not frame_source.is_opened():
+        raise RuntimeError(f"Could not open camera source: {source}")
+ 
+    mirror_frames = source == "webcam" if mirror is None else mirror
+    max_num_hands = 1 if hand in {"auto", "left", "right"} else 2
+    samples: dict[str, list[np.ndarray]] = {"right": [], "left": []}
+    timestamps: dict[str, list[float]] = {"right": [], "left": []}
+    qualities: dict[str, list[float]] = {"right": [], "left": []}
+    observed_units: set[str] = set()
+ 
+    start = time.perf_counter()
+    try:
+        with create_hand_detector(
+            max_num_hands=max_num_hands,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+            model_path=hand_landmarker_model,
+        ) as hands:
+            while True:
+                elapsed = time.perf_counter() - start
+                if elapsed >= duration_seconds:
+                    break
+ 
+                ok, camera_frame = frame_source.read()
+                if not ok or camera_frame is None:
+                    break
+                frame = camera_frame.color
+                depth_frame = camera_frame.depth
+                if mirror_frames:
+                    frame = cv2.flip(frame, 1)
+                    if depth_frame is not None:
+                        depth_frame = cv2.flip(depth_frame, 1)
+ 
+                intrinsics = None
+                if hasattr(frame_source, "get_rgb_intrinsics"):
+                    height, width = frame.shape[:2]
+                    intrinsics = frame_source.get_rgb_intrinsics(width, height)
+ 
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb.flags.writeable = False
+                results = hands.process(rgb)
+                rgb.flags.writeable = True
+ 
+                selected = select_hands(results, mirrored=mirror_frames, hand_filter=hand)
+                sample_elapsed = (
+                    camera_frame.timestamp - start
+                    if camera_frame.timestamp is not None
+                    else elapsed
+                )
+                for label, landmarks in selected:
+                    side = label if label in {"right", "left"} else "right"
+                    xyz, quality, units = hand_landmarks_to_xyz(
+                        landmarks,
+                        frame.shape,
+                        depth_frame=depth_frame,
+                        intrinsics=intrinsics,
+                    )
+                    if xyz.shape != (21, 3):
+                        continue
+                    samples[side].append(xyz)
+                    timestamps[side].append(float(sample_elapsed))
+                    qualities[side].append(quality)
+                    observed_units.add(units)
+ 
+                preview = frame.copy() if draw_overlay else frame
+                if draw_overlay:
+                    draw_hand_overlay(preview, selected)
+ 
+                yield preview, elapsed, None
+    finally:
+        frame_source.release()
+ 
+    right_ts = np.asarray(timestamps["right"], dtype=np.float64)
+    left_ts = np.asarray(timestamps["left"], dtype=np.float64)
+    primary_ts = right_ts if right_ts.size >= left_ts.size else left_ts
+    sample_rate = _infer_sample_rate(primary_ts, fps)
+    units = "mm" if observed_units == {"mm"} else ("image_px" if observed_units else "unknown")
+ 
+    final = {
+        "right": np.stack(samples["right"]) if samples["right"] else _empty_hand_array(),
+        "left": np.stack(samples["left"]) if samples["left"] else _empty_hand_array(),
+        "right_timestamps": right_ts,
+        "left_timestamps": left_ts,
+        "right_quality": np.asarray(qualities["right"], dtype=np.float64),
+        "left_quality": np.asarray(qualities["left"], dtype=np.float64),
+        "timestamps": primary_ts,
+        "sample_rate": sample_rate,
+        "metadata": {
+            "source": source,
+            "hand": hand,
+            "units": units,
+            "right_samples": len(samples["right"]),
+            "left_samples": len(samples["left"]),
+        },
+    }
+    # Final frame slot: yield a dummy black frame paired with the data so the
+    # UI can detect completion via the third tuple element.
+    yield np.zeros((1, 1, 3), dtype=np.uint8), duration_seconds, final
+
+
+
 
 
 def _empty_hand_array() -> np.ndarray:
