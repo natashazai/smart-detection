@@ -1029,3 +1029,226 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ── Facial capture (hypomimia mode) ───────────────────────────────────────────
+
+DEFAULT_FACE_LANDMARKER_MODEL_CANDIDATES = (
+    Path("face_landmarker.task"),
+    Path("models/face_landmarker.task"),
+)
+
+FACE_LANDMARKER_DOWNLOAD_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
+
+FACE_OVAL_IDXS = [
+    10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361,
+    288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149,
+    150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
+]
+FACE_KEY_IDXS = [61, 291, 117, 346]   # mouth corners + cheeks
+
+
+def _resolve_face_landmarker_model() -> Path | None:
+    """Return path to face_landmarker.task, downloading it if needed."""
+    for candidate in DEFAULT_FACE_LANDMARKER_MODEL_CANDIDATES:
+        resolved = candidate.expanduser()
+        if resolved.exists():
+            return resolved
+
+    # Not found locally — try to download next to hand_landmarker.task
+    try:
+        import urllib.request
+        dest = Path("face_landmarker.task")
+        print(f"[pipeline] Downloading face landmarker model to {dest} ...")
+        urllib.request.urlretrieve(FACE_LANDMARKER_DOWNLOAD_URL, dest)
+        if dest.exists():
+            print("[pipeline] Download complete.")
+            return dest
+    except Exception as exc:
+        print(f"[pipeline] Could not download face model: {exc}")
+
+    return None
+
+
+class _SolutionsFaceMesh:
+    """Thin wrapper around mp.solutions.face_mesh for use in capture loop."""
+
+    def __init__(self) -> None:
+        self._mesh = None
+
+    def __enter__(self):
+        self._mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        return self
+
+    def landmarks_from_rgb(self, rgb: np.ndarray) -> np.ndarray | None:
+        """Return (N_lm, 3) float32 array or None if no face detected."""
+        rgb.flags.writeable = False
+        results = self._mesh.process(rgb)
+        rgb.flags.writeable = True
+        if results.multi_face_landmarks:
+            lm = results.multi_face_landmarks[0].landmark
+            return np.array([[p.x, p.y, p.z] for p in lm], dtype=np.float32)
+        return None
+
+    def __exit__(self, *_) -> None:
+        if self._mesh is not None:
+            self._mesh.close()
+
+
+class _TasksFaceLandmarker:
+    """Thin wrapper around mediapipe.tasks FaceLandmarker."""
+
+    def __init__(self, model_path: Path) -> None:
+        self._model_path = model_path
+        self._landmarker = None
+
+    def __enter__(self):
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+
+        base = mp_python.BaseOptions(model_asset_path=str(self._model_path))
+        opts = vision.FaceLandmarkerOptions(
+            base_options=base,
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+        )
+        self._landmarker = vision.FaceLandmarker.create_from_options(opts)
+        return self
+
+    def landmarks_from_rgb(self, rgb: np.ndarray) -> np.ndarray | None:
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect(image)
+        if result.face_landmarks:
+            lm = result.face_landmarks[0]
+            return np.array([[p.x, p.y, p.z] for p in lm], dtype=np.float32)
+        return None
+
+    def __exit__(self, *_) -> None:
+        if self._landmarker is not None:
+            self._landmarker.close()
+
+
+def _create_face_detector():
+    """Return whichever face detector the installed MediaPipe supports."""
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+        return _SolutionsFaceMesh()
+
+    model_path = _resolve_face_landmarker_model()
+    if model_path is None:
+        raise RuntimeError(
+            "This MediaPipe install does not have mp.solutions (Tasks-only build). "
+            "A face_landmarker.task model file is required but could not be found or "
+            "downloaded. Place face_landmarker.task next to hand_landmarker.task and retry. "
+            f"Download URL: {FACE_LANDMARKER_DOWNLOAD_URL}"
+        )
+    return _TasksFaceLandmarker(model_path)
+
+
+def capture_face_data_streaming(
+    *,
+    duration_seconds: float = 10.0,
+    source: str = "webcam",
+    camera_index: int = 0,
+    fps: int = 30,
+    mirror: bool = True,
+    draw_overlay: bool = True,
+) -> "Iterator[tuple[np.ndarray, float, np.ndarray | None]]":
+    """Streaming face-landmark capture for hypomimia analysis.
+
+    Yields (preview_frame_bgr, elapsed_seconds, face_landmarks_or_None) on
+    every camera frame.  ``face_landmarks_or_None`` is None on every frame
+    except the last, where it carries the full (N_frames, 478, 3) array of
+    all detected landmark frames collected during the session.
+
+    Supports both classic mp.solutions.face_mesh and the newer MediaPipe
+    Tasks FaceLandmarker — whichever the installed version provides.
+
+    Args:
+        duration_seconds: How long to record.
+        source:           "webcam" | "oak" | "oak-rgb"
+        camera_index:     OpenCV camera index for webcam source.
+        fps:              Target capture frame rate.
+        mirror:           Flip frame horizontally (natural for selfie view).
+        draw_overlay:     Draw face oval and key landmarks on the preview frame.
+    """
+    load_runtime_dependencies()
+
+    frame_source = open_frame_source(source, camera_index=camera_index, fps=fps)
+    if not frame_source.is_opened():
+        raise RuntimeError(f"Could not open camera source: {source!r}")
+
+    all_frames: list[np.ndarray] = []
+    start = time.perf_counter()
+
+    with _create_face_detector() as face_detector:
+        try:
+            while True:
+                elapsed = time.perf_counter() - start
+                if elapsed >= duration_seconds:
+                    break
+
+                ok, cam_frame = frame_source.read()
+                if not ok or cam_frame is None:
+                    break
+
+                frame = cam_frame.color
+                if mirror:
+                    frame = cv2.flip(frame, 1)
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                coords = face_detector.landmarks_from_rgb(rgb)
+
+                preview = frame.copy()
+
+                if coords is not None:
+                    all_frames.append(coords)
+
+                    if draw_overlay:
+                        h, w = frame.shape[:2]
+                        pts = [
+                            (int(coords[i, 0] * w), int(coords[i, 1] * h))
+                            for i in FACE_OVAL_IDXS
+                            if i < len(coords)
+                        ]
+                        for j in range(len(pts)):
+                            cv2.line(preview, pts[j], pts[(j + 1) % len(pts)],
+                                     (30, 144, 255), 1, cv2.LINE_AA)
+                        for idx in FACE_KEY_IDXS:
+                            if idx < len(coords):
+                                px = int(coords[idx, 0] * w)
+                                py = int(coords[idx, 1] * h)
+                                cv2.circle(preview, (px, py), 4, (0, 255, 160), -1, cv2.LINE_AA)
+                else:
+                    cv2.putText(
+                        preview, "No face detected — centre your face", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 60, 220), 2, cv2.LINE_AA,
+                    )
+
+                yield preview, elapsed, None
+
+        finally:
+            if hasattr(frame_source, "release"):
+                frame_source.release()
+
+    # Final yield — carries the complete landmark array
+    landmarks_array = (
+        np.stack(all_frames, axis=0)
+        if all_frames
+        else np.empty((0, 478, 3), dtype=np.float32)
+    )
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    yield blank, duration_seconds, landmarks_array
