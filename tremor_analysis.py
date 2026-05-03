@@ -330,21 +330,19 @@ Do not diagnose. Do not alarm unnecessarily.
 """.strip()
 
 
-# ─────────────────────────────────────────────
-# NATASHA'S PART — Nemotron API client
-#
-# Nemotron 120B via OpenRouter — no GPU needed.
-# Get your free key at openrouter.ai
-# ─────────────────────────────────────────────
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 
 # ─────────────────────────────────────────────
-# NATASHA'S PART — Nemotron severity classifier
+# Nemotron severity classifier
 #
 # Sends amplitude to Nemotron 120B and gets back
 # FTM severity classification in caps for the UI.
@@ -398,9 +396,6 @@ Respond with ONLY this JSON, no thinking, no explanation:
                 "latency_s": round(time.time()-t0, 2), "error": str(e)}
 
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 55)

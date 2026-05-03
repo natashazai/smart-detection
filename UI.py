@@ -20,6 +20,16 @@ from tremor_analysis import (
 )
 from report_generator import generate_report
 
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
+nemotron_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+MODEL = "nvidia/nemotron-3-super-120b-a12b"
+
 SEVERITY_COLOR = {
     "none":     "#22c55e",
     "mild":     "#84cc16",
@@ -37,12 +47,6 @@ SCENARIOS = [
     {"name": "Severe tremor",         "frequency":  4.5, "amplitude": 15.0, "noise": 1.0},
 ]
 
-# Nemotron client for explanation
-nemotron_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key="",
-)
-MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 
 def get_explanation(features, severity: str, ftm: int) -> str:
