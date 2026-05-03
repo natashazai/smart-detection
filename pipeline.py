@@ -1,9 +1,10 @@
 """Camera capture pipeline for SENTINEL tremor analysis.
 
 This module keeps the hand detection approach from ``tremor_detector.py``:
-MediaPipe ``solutions.hands`` tracks full 21-point hands, then the recorder
-converts those landmarks into the ``hand_data`` shape consumed by
-``tremor_analysis.analyze_tremor``.
+MediaPipe tracks full 21-point hands, then the recorder converts those
+landmarks into the ``hand_data`` shape consumed by
+``tremor_analysis.analyze_tremor``. It supports both classic
+``mp.solutions.hands`` installs and newer MediaPipe Tasks installs.
 
 OAK-D Lite support is built around DepthAI socket detection so the app does not
 depend on hard-coded CAM_A/CAM_B/CAM_C assumptions when the device reports a
@@ -38,6 +39,12 @@ LANDMARK_INDEXES = {
     "middle_mcp": 9,
     "pinky_mcp": 17,
 }
+
+DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES = (
+    Path("hand_landmarker.task"),
+    Path("models/hand_landmarker.task"),
+    Path.home() / "Dev/HackathonParkinsonsDetection/models/hand_landmarker.task",
+)
 
 
 @dataclass
@@ -141,6 +148,30 @@ def detect_oak_camera_sockets(device: Any) -> tuple[Any, Any, Any]:
     return color_sockets[0], mono_sockets[0], mono_sockets[1]
 
 
+def detect_oak_color_socket(device: Any) -> Any:
+    """Return the OAK color socket without requiring stereo mono cameras."""
+    fallback = _socket("CAM_A", "RGB")
+    try:
+        features = device.getConnectedCameraFeatures()
+    except Exception:
+        return fallback
+
+    color_sockets = [
+        feature.socket
+        for feature in features
+        if "COLOR" in _sensor_type_names(feature)
+    ]
+    if color_sockets:
+        return color_sockets[0]
+    if not features:
+        return fallback
+    detected = ", ".join(
+        f"{getattr(feature.socket, 'name', feature.socket)}:{feature.name}:{sorted(_sensor_type_names(feature))}"
+        for feature in features
+    )
+    raise RuntimeError(f"No OAK color camera detected. Detected cameras: {detected}")
+
+
 def _mono_resolution() -> Any:
     return getattr(
         dai.MonoCameraProperties.SensorResolution,
@@ -167,8 +198,6 @@ def create_oak_d_lite_pipeline(
     """Build a DepthAI pipeline for OAK-D Lite RGB plus aligned stereo depth."""
     load_depthai_dependency()
     rgb_socket = _socket("CAM_A", "RGB") if rgb_socket is None else rgb_socket
-    left_socket = _socket("CAM_B", "LEFT") if left_socket is None else left_socket
-    right_socket = _socket("CAM_C", "RIGHT") if right_socket is None else right_socket
 
     pipeline = dai.Pipeline()
     cam_rgb = pipeline.create(dai.node.ColorCamera)
@@ -185,6 +214,8 @@ def create_oak_d_lite_pipeline(
     cam_rgb.isp.link(rgb_out.input)
 
     if include_depth:
+        left_socket = _socket("CAM_B", "LEFT") if left_socket is None else left_socket
+        right_socket = _socket("CAM_C", "RIGHT") if right_socket is None else right_socket
         mono_left = pipeline.create(dai.node.MonoCamera)
         mono_right = pipeline.create(dai.node.MonoCamera)
         stereo = pipeline.create(dai.node.StereoDepth)
@@ -200,7 +231,11 @@ def create_oak_d_lite_pipeline(
 
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
         stereo.setLeftRightCheck(True)
-        stereo.setSubpixel(True)
+        # Subpixel mode + HIGH_DENSITY + LR-check overruns the OAK-D Lite's
+        # Myriad X memory budget; the pipeline fails to boot and the device
+        # ends up stuck BOOTED, throwing X_LINK_INSUFFICIENT_PERMISSIONS on
+        # the next launch. Subpixel buys finer depth precision, which we
+        # don't need for landmark-scale tremor analysis.
         stereo.setDepthAlign(rgb_socket)
 
         mono_left.out.link(stereo.left)
@@ -236,7 +271,18 @@ class OakDFrameSource:
         load_depthai_dependency()
         self.include_depth = include_depth
         self.device = dai.Device()
-        rgb_socket, left_socket, right_socket = detect_oak_camera_sockets(self.device)
+        left_socket = None
+        right_socket = None
+        if include_depth:
+            try:
+                rgb_socket, left_socket, right_socket = detect_oak_camera_sockets(self.device)
+            except RuntimeError as exc:
+                print(f"{exc} Falling back to OAK RGB-only capture.")
+                self.include_depth = False
+                include_depth = False
+                rgb_socket = detect_oak_color_socket(self.device)
+        else:
+            rgb_socket = detect_oak_color_socket(self.device)
         self.rgb_socket = rgb_socket
         pipeline = create_oak_d_lite_pipeline(
             fps=fps,
@@ -317,16 +363,149 @@ def open_frame_source(source: str, *, camera_index: int = 0, fps: int = 30) -> A
     raise ValueError(f"Unsupported camera source: {source}")
 
 
+class SolutionsHandsDetector:
+    def __init__(
+        self,
+        *,
+        max_num_hands: int,
+        min_detection_confidence: float,
+        min_tracking_confidence: float,
+    ) -> None:
+        self.max_num_hands = max_num_hands
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
+        self._hands = None
+
+    def __enter__(self):
+        self._hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=self.max_num_hands,
+            model_complexity=1,
+            min_detection_confidence=self.min_detection_confidence,
+            min_tracking_confidence=self.min_tracking_confidence,
+        )
+        return self
+
+    def process(self, rgb_frame: np.ndarray) -> Any:
+        if self._hands is None:
+            raise RuntimeError("MediaPipe Hands detector is not initialized.")
+        return self._hands.process(rgb_frame)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self._hands is not None:
+            self._hands.close()
+
+
+class TasksHandDetector:
+    def __init__(
+        self,
+        *,
+        max_num_hands: int,
+        min_detection_confidence: float,
+        min_tracking_confidence: float,
+        model_path: str | Path | None,
+    ) -> None:
+        self.max_num_hands = max_num_hands
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
+        self.model_path = _resolve_hand_landmarker_model(model_path)
+        self._landmarker = None
+
+    def __enter__(self):
+        if self.model_path is None:
+            candidates = ", ".join(str(path) for path in DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES)
+            raise RuntimeError(
+                "This MediaPipe install does not expose mp.solutions, so pipeline.py "
+                "must use MediaPipe Tasks. Provide a hand landmarker model with "
+                f"--model PATH. Checked: {candidates}"
+            )
+
+        try:
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision
+        except ImportError as exc:
+            raise RuntimeError(
+                "MediaPipe Tasks is not available, and mp.solutions is missing."
+            ) from exc
+
+        base_options = mp_python.BaseOptions(model_asset_path=str(self.model_path))
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_hands=self.max_num_hands,
+            min_hand_detection_confidence=self.min_detection_confidence,
+            min_hand_presence_confidence=self.min_tracking_confidence,
+            min_tracking_confidence=self.min_tracking_confidence,
+        )
+        self._landmarker = vision.HandLandmarker.create_from_options(options)
+        return self
+
+    def process(self, rgb_frame: np.ndarray) -> Any:
+        if self._landmarker is None:
+            raise RuntimeError("MediaPipe Tasks hand detector is not initialized.")
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        return self._landmarker.detect(image)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self._landmarker is not None:
+            self._landmarker.close()
+
+
+def _resolve_hand_landmarker_model(model_path: str | Path | None) -> Path | None:
+    if model_path is not None:
+        resolved = Path(model_path).expanduser()
+        if not resolved.exists():
+            raise RuntimeError(f"Hand landmarker model was not found: {resolved}")
+        return resolved
+
+    for candidate in DEFAULT_HAND_LANDMARKER_MODEL_CANDIDATES:
+        resolved = candidate.expanduser()
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def create_hand_detector(
+    *,
+    max_num_hands: int,
+    min_detection_confidence: float,
+    min_tracking_confidence: float,
+    model_path: str | Path | None = None,
+) -> SolutionsHandsDetector | TasksHandDetector:
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
+        return SolutionsHandsDetector(
+            max_num_hands=max_num_hands,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+        )
+    return TasksHandDetector(
+        max_num_hands=max_num_hands,
+        min_detection_confidence=min_detection_confidence,
+        min_tracking_confidence=min_tracking_confidence,
+        model_path=model_path,
+    )
+
+
 def _handedness_label_and_score(handedness: Any) -> tuple[str | None, float]:
     if hasattr(handedness, "classification"):
         if not handedness.classification:
             return None, 0.0
         head = handedness.classification[0]
-        return head.label.lower(), float(head.score)
+        label = (
+            getattr(head, "label", None)
+            or getattr(head, "category_name", None)
+            or getattr(head, "display_name", None)
+        )
+        return label.lower() if label else None, float(head.score)
     if not handedness:
         return None, 0.0
     head = handedness[0]
-    return head.label.lower(), float(head.score)
+    label = (
+        getattr(head, "label", None)
+        or getattr(head, "category_name", None)
+        or getattr(head, "display_name", None)
+    )
+    return label.lower() if label else None, float(head.score)
 
 
 def hand_label_in_patient_anatomy(raw_label: str | None, mirrored: bool) -> str | None:
@@ -341,6 +520,9 @@ def hand_label_in_patient_anatomy(raw_label: str | None, mirrored: bool) -> str 
 def select_hands(results: Any, *, mirrored: bool, hand_filter: str) -> list[tuple[str, Any]]:
     landmark_groups = getattr(results, "multi_hand_landmarks", None)
     handedness_groups = getattr(results, "multi_handedness", None)
+    if landmark_groups is None:
+        landmark_groups = getattr(results, "hand_landmarks", None)
+        handedness_groups = getattr(results, "handedness", None)
     if not landmark_groups:
         return []
 
@@ -477,6 +659,7 @@ def capture_hand_data(
     camera_index: int = 0,
     fps: int = 30,
     mirror: bool | None = None,
+    hand_landmarker_model: str | Path | None = None,
     min_detection_confidence: float = 0.7,
     min_tracking_confidence: float = 0.7,
 ) -> dict[str, Any]:
@@ -503,12 +686,11 @@ def capture_hand_data(
 
     start = time.perf_counter()
     try:
-        with mp.solutions.hands.Hands(
-            static_image_mode=False,
+        with create_hand_detector(
             max_num_hands=max_num_hands,
-            model_complexity=1,
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
+            model_path=hand_landmarker_model,
         ) as hands:
             while (time.perf_counter() - start) < duration_seconds:
                 ok, camera_frame = frame_source.read()
@@ -614,6 +796,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=30, help="Requested camera FPS.")
     parser.add_argument("--hand", choices=("auto", "left", "right", "both"), default="both")
     parser.add_argument("--output", default="hand_xyz.csv", help="CSV output path.")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Path to hand_landmarker.task when using MediaPipe Tasks.",
+    )
     parser.add_argument("--analyze", action="store_true", help="Print tremor_analysis features after capture.")
     return parser.parse_args()
 
@@ -627,6 +814,7 @@ def main() -> int:
         hand=args.hand,
         camera_index=args.camera,
         fps=args.fps,
+        hand_landmarker_model=args.model,
     )
     write_hand_data_csv(hand_data, args.output)
     metadata = hand_data["metadata"]

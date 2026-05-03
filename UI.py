@@ -22,7 +22,7 @@ load_dotenv()
 
 nemotron_client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
+    api_key=os.getenv("NVIDIA_API_KEY"),
 )
 MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
