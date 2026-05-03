@@ -6,6 +6,7 @@ Run with:
 
 from __future__ import annotations
 
+import base64
 import os
 import time
 import streamlit as st
@@ -47,11 +48,9 @@ SEVERITY_BG = {
     "error":    "#f9fafb",
 }
 
-# Capture options offered in the sidebar. Order matters: OAK is the default.
+# Capture options offered in the sidebar. Webcam is the default.
 CAMERA_SOURCES = [
-    {"id": "oak",     "label": "OAK-D Lite (RGB + depth)"},
-    {"id": "oak-rgb", "label": "OAK-D Lite (RGB only)"},
-    {"id": "webcam",  "label": "Webcam"},
+    {"id": "webcam", "label": "Webcam"},
 ]
 
 HAND_OPTIONS = [
@@ -198,6 +197,33 @@ def render_processing_screen(slot, stage: str, detail: str) -> None:
     )
 
 
+def render_pdf_open_link(slot, pdf_bytes: bytes) -> None:
+    encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+    slot.markdown(
+        (
+            f'<a class="report-open-link" href="data:application/pdf;base64,{encoded_pdf}" target="_blank" '
+            'rel="noopener noreferrer" aria-label="Open SENTINEL PDF report in a new tab">'
+            "Open PDF Report</a>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_report_loading(slot) -> None:
+    slot.markdown(
+        (
+            '<div class="report-status-card" role="status" aria-live="polite">'
+            '<div class="report-status-spinner"></div>'
+            "<div>"
+            '<p class="report-status-title">Preparing PDF report</p>'
+            '<p class="report-status-detail">Nemotron is writing the clinical report and SENTINEL is formatting the PDF.</p>'
+            "</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="SENTINEL -- Tremor Screening",
@@ -263,6 +289,62 @@ def main() -> None:
         border: 1.5px solid #1a3a5c !important; border-radius: 6px !important; font-weight: 500 !important;
     }
     .stDownloadButton button:hover { background-color: #eff6ff !important; }
+    .report-open-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 42px;
+        background-color: #ffffff;
+        border: 1.5px solid #1a3a5c;
+        border-radius: 6px;
+        color: #1a3a5c !important;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.2;
+        padding: 10px 20px;
+        text-decoration: none !important;
+        box-sizing: border-box;
+    }
+    .report-open-link:hover {
+        background-color: #eff6ff;
+        color: #1a3a5c !important;
+        text-decoration: none !important;
+    }
+    .report-status-card {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        min-height: 58px;
+        background: #ffffff;
+        border: 1px solid #bfdbfe;
+        border-radius: 8px;
+        padding: 12px 14px;
+        box-sizing: border-box;
+    }
+    .report-status-spinner {
+        width: 24px;
+        height: 24px;
+        flex: 0 0 24px;
+        border-radius: 50%;
+        border: 3px solid #dbeafe;
+        border-top-color: #2563eb;
+        animation: sentinel-spin 0.85s linear infinite;
+    }
+    .report-status-title {
+        color: #1e3a5f;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1.2;
+        margin: 0 0 3px 0;
+    }
+    .report-status-detail {
+        color: #64748b;
+        font-size: 12px;
+        line-height: 1.35;
+        margin: 0;
+    }
 
     hr { border-color: #e2e8f0; }
 
@@ -441,7 +523,8 @@ def main() -> None:
 
     # Session state
     for key in ["last_features", "last_severity", "last_ftm",
-                "last_explanation", "last_result", "last_metadata"]:
+                "last_explanation", "last_result", "last_metadata",
+                "report_pdf_bytes", "report_pdf_signature"]:
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -518,6 +601,8 @@ def main() -> None:
         st.session_state.last_explanation = explanation
         st.session_state.last_result      = result
         st.session_state.last_metadata    = meta
+        st.session_state.report_pdf_bytes = None
+        st.session_state.report_pdf_signature = None
 
     # Results panel
     if st.session_state.last_features:
@@ -528,6 +613,16 @@ def main() -> None:
         result      = st.session_state.last_result
         color       = SEVERITY_COLOR.get(severity, "#6b7280")
         bg          = SEVERITY_BG.get(severity, "#f9fafb")
+        report_signature = (
+            severity,
+            ftm,
+            features.amplitude_mm,
+            features.dominant_frequency_hz,
+            features.symmetry_score,
+        )
+        if st.session_state.report_pdf_signature != report_signature:
+            st.session_state.report_pdf_bytes = None
+            st.session_state.report_pdf_signature = report_signature
 
         st.markdown(
             f"<div style='background:white;border:1px solid #e2e8f0;"
@@ -560,27 +655,16 @@ def main() -> None:
 
         st.markdown("<br/>", unsafe_allow_html=True)
         st.markdown("#### Clinical Report")
-        st.markdown(
-            "<div style='background:white;border:1px solid #e2e8f0;border-radius:8px;padding:20px 24px;margin-bottom:16px;'>"
-            "<p style='color:#374151;font-size:13px;margin:0;'>"
-            "Generate a structured PDF report containing your full assessment, measurements, "
-            "clinical findings, and recommendations. This report can be shared with your physician."
-            "</p></div>",
-            unsafe_allow_html=True,
-        )
 
         col_btn, col_empty = st.columns([1, 3])
         with col_btn:
-            if st.button("Generate PDF Report", type="primary", use_container_width=True):
-                with st.spinner("Generating clinical report..."):
-                    pdf_bytes = generate_report(features, severity, ftm)
-                st.download_button(
-                    label="Download Report",
-                    data=pdf_bytes,
-                    file_name=f"sentinel_report_{severity}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+            report_action_slot = st.empty()
+            if st.session_state.report_pdf_bytes:
+                render_pdf_open_link(report_action_slot, st.session_state.report_pdf_bytes)
+            else:
+                render_report_loading(report_action_slot)
+                st.session_state.report_pdf_bytes = generate_report(features, severity, ftm)
+                render_pdf_open_link(report_action_slot, st.session_state.report_pdf_bytes)
 
     elif not run:
         st.markdown(
