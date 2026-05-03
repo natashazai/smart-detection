@@ -47,66 +47,6 @@ class TremorFeatures:
 
 
 # ─────────────────────────────────────────────
-# MOCK DATA GENERATOR
-# Replace with Person 1's real OAK-D stream
-# ─────────────────────────────────────────────
-
-def generate_mock_hand_data(
-    duration_seconds: int = 30,
-    sample_rate: int = 30,
-    tremor_frequency: float = 5.0,
-    tremor_amplitude: float = 3.5,
-    noise_level: float = 0.5,
-    seed: int = 42
-) -> dict:
-    """
-    Simulates 30 seconds of hand landmark XYZ data at 30fps.
-
-    Returns dict with shape:
-    {
-        "right": np.array of shape (N, 21, 3),  # 21 landmarks, XYZ
-        "left":  np.array of shape (N, 21, 3),
-        "timestamps": np.array of shape (N,)
-    }
-
-    When Person 1 is ready, swap this function out for the real feed.
-    Landmark index 8 = index fingertip (most useful for tremor tracking).
-    """
-    np.random.seed(seed)
-    N = duration_seconds * sample_rate
-    t = np.linspace(0, duration_seconds, N)
-
-    def make_hand(freq, amp, noise):
-        landmarks = np.zeros((N, 21, 3))
-        for i in range(21):
-            # Tremor signal on all axes, stronger on fingertips (index 4–20)
-            scale = 1.0 if i < 4 else 1.5
-            landmarks[:, i, 0] = amp * scale * np.sin(2 * np.pi * freq * t) + noise * np.random.randn(N)
-            landmarks[:, i, 1] = amp * scale * np.sin(2 * np.pi * freq * t + 0.3) + noise * np.random.randn(N)
-            landmarks[:, i, 2] = amp * scale * np.sin(2 * np.pi * freq * t + 0.6) + noise * np.random.randn(N)
-        return landmarks
-
-    right_hand = make_hand(tremor_frequency, tremor_amplitude, noise_level)
-
-    # Parkinson's is typically asymmetric — left hand slightly different
-    left_hand = make_hand(
-        freq=tremor_frequency * 0.85,
-        amp=tremor_amplitude * 0.4,   # weaker on non-dominant side
-        noise=noise_level
-    )
-
-    return {
-        "right": right_hand,
-        "left": left_hand,
-        "timestamps": t,
-        "right_timestamps": t,
-        "left_timestamps": t,
-        "sample_rate": sample_rate,
-        "metadata": {"source": "mock", "units": "mm"},
-    }
-
-
-# ─────────────────────────────────────────────
 # CORE ANALYSIS FUNCTIONS
 # ─────────────────────────────────────────────
 
@@ -168,8 +108,8 @@ def compute_dominant_frequency(signal_xyz: np.ndarray, sample_rate: float) -> tu
     # Frequencies below 3 Hz are voluntary movement, not tremor.
     # Reject after finding true dominant so harmonics of slow movement
     # don't slip through (e.g. 2×2.81 = 5.62 Hz looks like Parkinson's).
-    if dominant_freq < 3.0:
-        return 0.0, 0.0
+    # if dominant_freq < 3.0:
+    #     return 0.0, 0.0
 
     confidence = combined_spectrum[dominant_idx] / combined_spectrum.sum()
     return dominant_freq, float(np.clip(confidence * 5, 0, 1))
@@ -679,39 +619,3 @@ def classify_with_nemotron(features: "TremorFeatures | float") -> dict:
         })
 
     return base_result
-
-
-
-
-if __name__ == "__main__":
-    print("=" * 55)
-    print("  SENTINEL — Tremor Analysis (Mock Mode)")
-    print("=" * 55)
-
-    # Simulate a concerning Parkinson's profile
-    print("\n[1] Generating mock hand data (Parkinson's profile)...")
-    hand_data = generate_mock_hand_data(
-        duration_seconds=30,
-        sample_rate=30,
-        tremor_frequency=5.2,    # in Parkinson's range
-        tremor_amplitude=4.0,    # noticeable amplitude
-        noise_level=0.5
-    )
-
-    print("[2] Running tremor analysis...")
-    features = analyze_tremor(hand_data)
-
-    print("\n── Extracted Features ──────────────────────────")
-    print(json.dumps(asdict(features), indent=2))
-
-    # NATASHA'S PART — send to Nemotron and print result
-    print("\n── Nemotron Severity Classification (Natasha) ──")
-    result   = classify_with_nemotron(features.amplitude_mm)
-    severity = result.get("severity", "error").upper()
-    ftm      = result.get("ftm_score", "?")
-    latency  = result.get("latency_s", "?")
-
-    print(f"  Amplitude : {features.amplitude_mm} mm")
-    print(f"  SEVERITY  : {severity}  (FTM grade {ftm})  [{latency}s]")
-
-    print("\n✓ Done")
